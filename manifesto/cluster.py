@@ -69,6 +69,9 @@ class DevConfig(BaseModel):
     gpus: int = Field(1, ge=0)
     venv: str | None = None
     source: str | None = None
+    worktrees: str | None = None
+    envs_cache: str | None = None
+    dns_policy: Literal["ClusterFirst", "Default", "ClusterFirstWithHostNet", "None"] = "Default"
 
 
 class CacheConfig(BaseModel):
@@ -327,6 +330,22 @@ class Cluster(BaseModel):
             return f"{self.storage.shared_mount_path}/{{user}}/vllm-dev"
         return None
 
+    @property
+    def dev_worktrees_template(self) -> str | None:
+        if self.dev.worktrees:
+            return self.dev.worktrees
+        if self.user_root_template:
+            return f"{self.user_root_template}/vllm-worktrees"
+        return None
+
+    @property
+    def dev_envs_cache_template(self) -> str | None:
+        if self.dev.envs_cache:
+            return self.dev.envs_cache
+        if self.user_root_template:
+            return f"{self.user_root_template}/vllm-envs-cache"
+        return None
+
     def user_root(self, *, user: str, release: str) -> str:
         return self.user_root_template.format(user=user, release=release)
 
@@ -351,6 +370,16 @@ class Cluster(BaseModel):
         if self.dev_source_template is None:
             raise ValueError("development mode requires a configured source filesystem")
         return self.dev_source_template.format(user=user, release=release)
+
+    def dev_worktrees(self, *, user: str, release: str) -> str:
+        if self.dev_worktrees_template is None:
+            raise ValueError("development worktrees require a configured filesystem")
+        return self.dev_worktrees_template.format(user=user, release=release)
+
+    def dev_envs_cache(self, *, user: str, release: str) -> str:
+        if self.dev_envs_cache_template is None:
+            raise ValueError("development environment caching requires a configured filesystem")
+        return self.dev_envs_cache_template.format(user=user, release=release)
 
     @property
     def has_cache_filesystem(self) -> bool:

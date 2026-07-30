@@ -39,6 +39,11 @@ from .workflow import (
     dev_shell,
     dev_start,
     dev_stop,
+    dev_worktree_create,
+    dev_worktree_list,
+    dev_worktree_remove,
+    dev_worktree_shell,
+    dev_worktree_sync,
     diff_file,
     load_cluster_with_overrides,
     load_dotenv,
@@ -115,6 +120,10 @@ def _add_render_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--cache-root")
     parser.add_argument("--dev-venv")
     parser.add_argument("--dev-source")
+    parser.add_argument(
+        "--dev-worktree",
+        help="use a named vLLM worktree and its .venv from the dev filesystem",
+    )
     parser.add_argument("--pre-launch", action="append", default=[])
 
 
@@ -427,6 +436,11 @@ def _build_parser() -> argparse.ArgumentParser:
     dev_start_parser.add_argument("--dev-cpu", help="override the dev pod CPU request")
     dev_start_parser.add_argument("--dev-memory", help="override the dev pod memory request")
     dev_start_parser.add_argument("--dev-gpus", type=int, help="override the dev pod GPU request")
+    dev_start_parser.add_argument(
+        "--skip-hf-secret-sync",
+        action="store_true",
+        help="use an existing hf-secret without reading or updating it",
+    )
     dev_start_parser.add_argument("--remote", default=VLLM_DEV_REMOTE)
     dev_start_parser.add_argument("--branch", default=VLLM_DEV_BRANCH)
     dev_start_parser.set_defaults(func=dev_start)
@@ -455,6 +469,52 @@ def _build_parser() -> argparse.ArgumentParser:
     dev_stop_parser = dev_sub.add_parser("stop", help="delete the development pod")
     _add_dev_args(dev_stop_parser)
     dev_stop_parser.set_defaults(func=dev_stop)
+
+    dev_worktree_parser = dev_sub.add_parser(
+        "worktree", help="manage cached vLLM worktree environments in the development pod"
+    )
+    dev_worktree_sub = dev_worktree_parser.add_subparsers(
+        dest="dev_worktree_command", required=True
+    )
+
+    dev_worktree_create_parser = dev_worktree_sub.add_parser(
+        "create", help="create and initialize a named worktree environment"
+    )
+    _add_dev_args(dev_worktree_create_parser)
+    dev_worktree_create_parser.add_argument("name")
+    dev_worktree_create_parser.add_argument("--ref", default=VLLM_DEV_BRANCH)
+    dev_worktree_create_parser.add_argument("--remote", default=VLLM_DEV_REMOTE)
+    dev_worktree_create_parser.set_defaults(func=dev_worktree_create)
+
+    dev_worktree_list_parser = dev_worktree_sub.add_parser(
+        "list", help="list worktree environments"
+    )
+    _add_dev_args(dev_worktree_list_parser)
+    dev_worktree_list_parser.set_defaults(func=dev_worktree_list)
+
+    dev_worktree_sync_parser = dev_worktree_sub.add_parser(
+        "sync", help="synchronize a worktree environment with its current checkout"
+    )
+    _add_dev_args(dev_worktree_sync_parser)
+    dev_worktree_sync_parser.add_argument("name")
+    dev_worktree_sync_parser.set_defaults(func=dev_worktree_sync)
+
+    dev_worktree_shell_parser = dev_worktree_sub.add_parser(
+        "shell", help="open a shell with a worktree environment activated"
+    )
+    _add_dev_args(dev_worktree_shell_parser)
+    dev_worktree_shell_parser.add_argument("name")
+    dev_worktree_shell_parser.set_defaults(func=dev_worktree_shell)
+
+    dev_worktree_remove_parser = dev_worktree_sub.add_parser(
+        "remove", help="remove a named worktree environment, leaving shared caches intact"
+    )
+    _add_dev_args(dev_worktree_remove_parser)
+    dev_worktree_remove_parser.add_argument("name")
+    dev_worktree_remove_parser.add_argument(
+        "--force", action="store_true", help="allow removal even when the worktree has local changes"
+    )
+    dev_worktree_remove_parser.set_defaults(func=dev_worktree_remove)
 
     file_parser = sub.add_parser("file", help="manage the saved workflow manifest")
     file_sub = file_parser.add_subparsers(dest="file_command", required=True)

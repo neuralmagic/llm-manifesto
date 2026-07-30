@@ -775,6 +775,7 @@ def test_dev_pod_derives_storage_and_paths_from_cluster_profile():
     assert container["image"] == "quay.io/tms/vllm-dev:latest"
     assert volumes["shared-storage"]["persistentVolumeClaim"]["claimName"] == "example-shared-cache"
     assert container["workingDir"] == "/tmp"
+    assert pod["spec"]["dnsPolicy"] == "Default"
     assert env["HF_HOME"] == "/mnt/shared/hf_cache"
     assert env["CCACHE_DIR"] == "/mnt/shared/tester-name/ccache"
     assert env["UV_CACHE_DIR"] == "/mnt/shared/tester-name/dev-caches/uv"
@@ -838,19 +839,18 @@ def test_openshift_dev_pod_uses_non_root_security_and_cluster_placement():
         "capabilities": {"drop": ["ALL"]},
     }
 
-    pod = render_dev_pod(cluster, "tester")
+    pod = render_dev_pod(cluster, "tester", run_as_user=1000960000)
     container = pod["spec"]["containers"][0]
 
     assert pod["spec"]["securityContext"] == {
-        "fsGroup": 2000,
+        "fsGroup": 1000960000,
         "fsGroupChangePolicy": "OnRootMismatch",
     }
     assert container["securityContext"] == {
         "allowPrivilegeEscalation": False,
         "capabilities": {"drop": ["ALL"]},
-        "runAsGroup": 0,
         "runAsNonRoot": True,
-        "runAsUser": 2000,
+        "runAsUser": 1000960000,
         "seccompProfile": {"type": "RuntimeDefault"},
     }
     assert pod["spec"]["affinity"] == cluster.pod_defaults.affinity

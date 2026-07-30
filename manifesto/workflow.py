@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -28,6 +29,7 @@ HF_SECRET_KEY = "HF_TOKEN"
 VLLM_DEV_REMOTE = "https://github.com/vllm-project/vllm.git"
 VLLM_DEV_BRANCH = "main"
 VLLM_BUILD_JOBS = 16
+DEV_WORKTREE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 # Stateless teardown allowlist. Keep this in sync with the label-bearing objects
 # emitted by manifesto.render. Values are kubectl resource names as reported by
@@ -269,7 +271,23 @@ def resolve_cluster(explicit: str | None = None) -> str:
 def load_runtime_cluster(config: RuntimeConfig, args):
     if not config.cluster_path:
         raise WorkflowError("No cluster profile configured.", code=2)
-    return load_cluster_with_overrides(config.cluster_path, args)
+    cluster = load_cluster_with_overrides(config.cluster_path, args)
+    worktree_name = getattr(args, "dev_worktree", None)
+    if worktree_name:
+        if getattr(args, "dev_source", None) or getattr(args, "dev_venv", None):
+            raise WorkflowError(
+                "--dev-worktree cannot be combined with --dev-source or --dev-venv",
+                code=2,
+            )
+        worktree = cluster.dev_worktrees(
+            user=Instance(user=config.user, release="dev").user_slug,
+            release="",
+        ) + f"/{validate_dev_worktree_name(worktree_name)}"
+        cluster = cluster.with_path_overrides(
+            dev_source=worktree,
+            dev_venv=f"{worktree}/.venv",
+        )
+    return cluster
 
 
 def load_cluster_with_overrides(cluster_path: str, args):
@@ -286,7 +304,7 @@ def apply_runtime_overrides(spec, args, config: RuntimeConfig) -> None:
     spec.namespace = config.namespace
     if getattr(args, "accelerator", None):
         spec.accelerator = args.accelerator
-    if getattr(args, "dev", False):
+    if getattr(args, "dev", False) or getattr(args, "dev_worktree", None):
         spec.runtime.dev = True
     if getattr(args, "dev_venv", None):
         spec.runtime.dev_venv = args.dev_venv
@@ -338,6 +356,8 @@ def manifest_header(args, config: RuntimeConfig, *, routing_only: bool) -> list[
     ]
     if getattr(args, "dev", False):
         command.append("--dev")
+    if getattr(args, "dev_worktree", None):
+        command.extend(["--dev-worktree", args.dev_worktree])
     if getattr(args, "accelerator", None):
         command.extend(["--gpu", args.accelerator])
     routing_profile = getattr(args, "routing_profile", None) or os.environ.get(
@@ -445,6 +465,62 @@ def _dev_paths(
     )
 
 
+def validate_dev_worktree_name(name: str) -> str:
+    if not DEV_WORKTREE_NAME_RE.fullmatch(name) or name in {".", ".."}:
+        raise WorkflowError(
+            "worktree name must start with an alphanumeric character and contain only "
+            "letters, numbers, '.', '_', or '-' (128 characters maximum)",
+            code=2,
+        )
+    return name
+
+
+def _dev_worktree_storage(
+    config: RuntimeConfig,
+    args,
+) -> tuple[str, str, str]:
+    cluster = load_runtime_cluster(config, args)
+    instance, _ = _dev_identity(config)
+    user = instance.user_slug
+    root = cluster.dev_worktrees(user=user, release="")
+    cache = cluster.dev_envs_cache(user=user, release="")
+    source = cluster.dev_source(user=user, release="")
+    return source, root, cache
+
+
+def _dev_worktree_paths(
+    config: RuntimeConfig,
+    args,
+) -> tuple[str, str, str, str]:
+    source, root, cache = _dev_worktree_storage(config, args)
+    name = validate_dev_worktree_name(args.name)
+    return source, root, cache, f"{root}/{name}"
+
+
+def _dev_worktree_env(root: str, cache: str) -> list[str]:
+    return [f"VE_ENVS_ROOT={root}", f"VE_CACHE_DIR={cache}"]
+
+
+def _openshift_namespace_uid(config: RuntimeConfig) -> int:
+    uid_range = capture(
+        [
+            *config.kubectl(),
+            "get",
+            "namespace",
+            config.namespace,
+            "-o",
+            "jsonpath={.metadata.annotations.openshift\\.io/sa\\.scc\\.uid-range}",
+        ]
+    ).strip()
+    value = uid_range.partition("/")[0]
+    if not value.isdigit():
+        raise WorkflowError(
+            f"namespace {config.namespace} has no valid OpenShift SCC UID range",
+            code=2,
+        )
+    return int(value)
+
+
 def dev_start(
     args,
     *,
@@ -456,10 +532,16 @@ def dev_start(
     cluster, _, _, _ = _dev_paths(config, args, cluster=cluster)
     accelerator = cluster.accelerators.get(args.accelerator)
     _, pod_name = _dev_identity(config)
+    run_as_user = None
+    if cluster.platform == "openshift" and not (
+        cluster.pod_defaults.container_security_context or {}
+    ).get("runAsUser"):
+        run_as_user = _openshift_namespace_uid(config)
 
-    rc = sync_hf_secret(config)
-    if rc:
-        return rc
+    if not getattr(args, "skip_hf_secret_sync", False):
+        rc = sync_hf_secret(config)
+        if rc:
+            return rc
     rc = run(
         [*config.kubectl(), "apply", "-f", "-"],
         input_text=render_to_yaml(
@@ -472,6 +554,7 @@ def dev_start(
                     cpu=getattr(args, "dev_cpu", None),
                     memory=getattr(args, "dev_memory", None),
                     gpus=getattr(args, "dev_gpus", None),
+                    run_as_user=run_as_user,
                 )
             ]
         ),
@@ -517,7 +600,7 @@ elif [ -n "$(find "$MANIFESTO_DEV_SOURCE" -mindepth 1 -maxdepth 1 -print -quit 2
   exit 1
 else
   echo "Cloning $MANIFESTO_VLLM_REMOTE ($MANIFESTO_VLLM_BRANCH) to $MANIFESTO_DEV_SOURCE"
-  git clone --branch "$MANIFESTO_VLLM_BRANCH" --single-branch \
+  git clone --depth 1 --branch "$MANIFESTO_VLLM_BRANCH" --single-branch \
     "$MANIFESTO_VLLM_REMOTE" "$MANIFESTO_DEV_SOURCE"
 fi
 
@@ -558,6 +641,130 @@ def dev_shell(args) -> int:
     config = RuntimeConfig.from_args(args, require_cluster=False)
     _, pod_name = _dev_identity(config)
     return run([*config.kubectl(), "exec", "-it", pod_name, "--", "/bin/zsh"])
+
+
+def dev_worktree_create(args) -> int:
+    config = RuntimeConfig.from_args(args)
+    source, root, cache, _ = _dev_worktree_paths(config, args)
+    _, pod_name = _dev_identity(config)
+    return run(
+        [
+            *config.kubectl(),
+            "exec",
+            "-i",
+            pod_name,
+            "--",
+            "env",
+            *_dev_worktree_env(root, cache),
+            "bash",
+            "-c",
+            (
+                'mkdir -p "$4" "$5" "$(dirname "$3")"; '
+                'if [ ! -d "$3/.git" ]; then '
+                'if [ -e "$3" ] && [ -n "$(find "$3" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; '
+                'then echo "Error: $3 is not an empty directory or git checkout" >&2; exit 1; fi; '
+                'git clone --depth 1 --branch main --single-branch "$6" "$3"; fi; '
+                'command -v ve >/dev/null 2>&1 || { echo "Error: ve is not installed in the dev image" >&2; exit 1; }; '
+                'if git -C "$3" rev-parse --verify --quiet "$1^{commit}" >/dev/null; then '
+                'resolved_ref="$1"; else git -C "$3" fetch origin "$1" && resolved_ref=FETCH_HEAD; fi; '
+                'exec ve new "$resolved_ref" --name "$2" --repo "$3"'
+            ),
+            "bash",
+            args.ref,
+            args.name,
+            source,
+            root,
+            cache,
+            args.remote,
+        ]
+    )
+
+
+def dev_worktree_list(args) -> int:
+    config = RuntimeConfig.from_args(args)
+    _, root, cache = _dev_worktree_storage(config, args)
+    _, pod_name = _dev_identity(config)
+    return run(
+        [
+            *config.kubectl(),
+            "exec",
+            pod_name,
+            "--",
+            "env",
+            *_dev_worktree_env(root, cache),
+            "ve",
+            "list",
+        ]
+    )
+
+
+def dev_worktree_sync(args) -> int:
+    config = RuntimeConfig.from_args(args)
+    _, root, cache, worktree = _dev_worktree_paths(config, args)
+    _, pod_name = _dev_identity(config)
+    return run(
+        [
+            *config.kubectl(),
+            "exec",
+            "-i",
+            pod_name,
+            "--",
+            "env",
+            *_dev_worktree_env(root, cache),
+            "bash",
+            "-c",
+            'cd "$1" && exec ve sync',
+            "bash",
+            worktree,
+        ]
+    )
+
+
+def dev_worktree_shell(args) -> int:
+    config = RuntimeConfig.from_args(args)
+    _, root, cache, worktree = _dev_worktree_paths(config, args)
+    _, pod_name = _dev_identity(config)
+    return run(
+        [
+            *config.kubectl(),
+            "exec",
+            "-it",
+            pod_name,
+            "--",
+            "env",
+            *_dev_worktree_env(root, cache),
+            "bash",
+            "-c",
+            'cd "$1" && source .venv/bin/activate && exec /bin/zsh',
+            "bash",
+            worktree,
+        ]
+    )
+
+
+def dev_worktree_remove(args) -> int:
+    if not args.force:
+        raise WorkflowError(
+            "removing a worktree can discard uncommitted changes; rerun with --force",
+            code=2,
+        )
+    config = RuntimeConfig.from_args(args)
+    _, root, cache, _ = _dev_worktree_paths(config, args)
+    _, pod_name = _dev_identity(config)
+    return run(
+        [
+            *config.kubectl(),
+            "exec",
+            "-i",
+            pod_name,
+            "--",
+            "env",
+            *_dev_worktree_env(root, cache),
+            "ve",
+            "rm",
+            args.name,
+        ]
+    )
 
 
 def dev_build(args) -> int:

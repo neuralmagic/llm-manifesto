@@ -638,6 +638,52 @@ manifesto deploy models/deepseek-v4/1P-EP8-1D-EP8.yaml --dev \
   --dev-venv /mnt/shared/$USER/custom-vllm-venv
 ```
 
+### Cached dev worktrees
+
+The dev image must include the `ve` helper to create
+independent vLLM worktrees with per-worktree `.venv` directories and a shared,
+content-addressed build cache. Once a dev pod has any writable development
+filesystem mounted, worktree creation initializes the primary checkout and
+cache directories there as needed. Worktree mutations and cache writes happen
+only in that persistent dev pod.
+
+```bash
+manifesto dev start
+manifesto dev worktree create fix-123 --ref origin/main
+manifesto dev worktree list
+manifesto dev worktree shell fix-123
+manifesto dev worktree sync fix-123
+
+manifesto deploy models/deepseek-v4/1P-EP8-1D-EP8.yaml \
+  --dev-worktree fix-123
+```
+
+`--dev-worktree` implies `--dev` and selects both the named checkout and its
+`.venv`. Worktree creation initializes the primary checkout when the mounted
+dev filesystem is empty, so no separate worktree mode is required. Missing refs
+are fetched from the primary checkout's `origin` before the worktree is created.
+Removal is explicit and destructive:
+
+```bash
+manifesto dev worktree remove fix-123 --force
+```
+
+The default paths are `{user_root}/vllm-worktrees` and
+`{user_root}/vllm-envs-cache`. A cluster profile can override them:
+
+```yaml
+dev:
+  worktrees: /mnt/shared/{user}/vllm-worktrees
+  envs_cache: /mnt/shared/{user}/vllm-envs-cache
+```
+
+The cache works without reflinks but then copies complete environments, which
+can consume substantially more PVC capacity. Keep cache mutation in one dev
+pod: filesystem `flock` behavior varies across RWX storage drivers, and the
+helper does not currently provide a cross-host cache/GC lock. Model-server pods
+use the selected worktree and `.venv` but do not run `ve` or mutate its shared
+cache.
+
 ## Monitoring
 
 The `monitoring/` directory contains namespace-scoped Prometheus and Grafana

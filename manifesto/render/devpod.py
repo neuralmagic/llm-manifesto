@@ -16,6 +16,7 @@ def render_dev_pod(
     cpu: str | None = None,
     memory: str | None = None,
     gpus: int | None = None,
+    run_as_user: int | None = None,
 ) -> dict:
     accelerator = accelerator or cluster.accelerators.get()
     instance = Instance(user=user, release="dev")
@@ -89,11 +90,11 @@ def render_dev_pod(
         container_security_context = {
             "allowPrivilegeEscalation": False,
             "capabilities": {"drop": ["ALL"]},
-            "runAsGroup": 0,
             "runAsNonRoot": True,
-            "runAsUser": 2000,
             "seccompProfile": {"type": "RuntimeDefault"},
         } | (container_security_context or {})
+        if run_as_user is not None:
+            container_security_context["runAsUser"] = run_as_user
 
     pod = {
         "apiVersion": "v1",
@@ -131,14 +132,15 @@ def render_dev_pod(
         pod["spec"]["containers"][0]["securityContext"] = container_security_context
     else:
         pod["spec"]["securityContext"] = {"runAsUser": 0, "runAsGroup": 0}
-    if cluster.platform == "openshift":
+    if cluster.platform == "openshift" and "runAsUser" in container_security_context:
         fs_group = container_security_context["runAsUser"]
         pod["spec"]["securityContext"] = {
             "fsGroup": fs_group,
             "fsGroupChangePolicy": "OnRootMismatch",
         }
-    if cluster.pod_defaults.dns_policy:
-        pod["spec"]["dnsPolicy"] = cluster.pod_defaults.dns_policy
+    dns_policy = cluster.pod_defaults.dns_policy or cluster.dev.dns_policy
+    if dns_policy:
+        pod["spec"]["dnsPolicy"] = dns_policy
     if cluster.pod_defaults.dns_config:
         pod["spec"]["dnsConfig"] = cluster.pod_defaults.dns_config
     return pod

@@ -837,9 +837,37 @@ def test_dev_start_applies_waits_and_initializes_environment(monkeypatch):
     ]
     assert "MANIFESTO_DEV_SOURCE=/mnt/shared/tester-name/vllm-dev" in init_cmd
     assert "MANIFESTO_DEV_VENV=/mnt/shared/tester-name/vllm-venv" in init_cmd
-    assert "git clone --branch" in init_script
+    assert "git clone --depth 1 --branch" in init_script
     assert "cp -a /opt/vllm" in init_script
     assert "uv venv --python /usr/bin/python3.12" in init_script
+
+
+def test_dev_start_can_use_existing_hf_secret_without_sync(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        workflow,
+        "run",
+        lambda cmd, *, input_text=None: calls.append((cmd, input_text)) or 0,
+    )
+
+    rc = main(
+        [
+            "dev",
+            "start",
+            "--cluster",
+            str(CLUSTER),
+            "--namespace",
+            "workload-ns",
+            "--user",
+            "tester",
+            "--skip-hf-secret-sync",
+        ]
+    )
+
+    assert rc == 0
+    assert len(calls) == 3
+    assert calls[0][0] == ["kubectl", "-n", "workload-ns", "apply", "-f", "-"]
+    assert yaml.safe_load(calls[0][1])["kind"] == "Pod"
 
 
 def test_dev_build_initializes_then_starts_background_build(monkeypatch):
@@ -904,6 +932,138 @@ def test_dev_shell_and_stop_do_not_require_cluster(monkeypatch):
             "--ignore-not-found=true",
         ],
     ]
+
+
+def test_named_dev_worktree_selects_source_and_venv(capsys):
+    rc = main(
+        [
+            "render",
+            "manifest",
+            str(MODEL),
+            "--cluster",
+            str(CLUSTER),
+            "--namespace",
+            "workload-ns",
+            "--user",
+            "Tester.Name",
+            "--dev-worktree",
+            "issue-123",
+        ]
+    )
+
+    assert rc == 0
+    rendered = capsys.readouterr().out
+    worktree = "/mnt/shared/tester-name/vllm-worktrees/issue-123"
+    assert "--dev-worktree issue-123" in rendered
+    assert f"value: {worktree}/.venv" in rendered
+    assert f"find {worktree}/vllm" in rendered
+
+
+def test_dev_worktree_commands_run_ve_in_persistent_paths(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        workflow,
+        "run",
+        lambda cmd, *, input_text=None: calls.append(cmd) or 0,
+    )
+    common = [
+        "--cluster",
+        str(CLUSTER),
+        "--namespace",
+        "workload-ns",
+        "--user",
+        "Tester.Name",
+    ]
+
+    assert main(["dev", "worktree", "create", "fix-123", "--ref", "origin/main", *common]) == 0
+    assert main(["dev", "worktree", "list", *common]) == 0
+    assert main(["dev", "worktree", "sync", "fix-123", *common]) == 0
+    assert main(["dev", "worktree", "shell", "fix-123", *common]) == 0
+    assert main(["dev", "worktree", "remove", "fix-123", "--force", *common]) == 0
+
+    root = "/mnt/shared/tester-name/vllm-worktrees"
+    cache = "/mnt/shared/tester-name/vllm-envs-cache"
+    env = [f"VE_ENVS_ROOT={root}", f"VE_CACHE_DIR={cache}"]
+    create = calls[0]
+    assert create[-7:] == [
+        "bash",
+        "origin/main",
+        "fix-123",
+        "/mnt/shared/tester-name/vllm-dev",
+        root,
+        cache,
+        "https://github.com/vllm-project/vllm.git",
+    ]
+    create_script = create[-8]
+    assert 'mkdir -p "$4" "$5"' in create_script
+    assert 'git clone --depth 1 --branch main --single-branch "$6" "$3"' in create_script
+    assert "command -v ve" in create_script
+    assert 'exec ve new "$resolved_ref" --name "$2" --repo "$3"' in create_script
+    assert calls[1][-5:] == ["env", *env, "ve", "list"]
+    assert calls[2][-8:] == [
+        "env",
+        *env,
+        "bash",
+        "-c",
+        'cd "$1" && exec ve sync',
+        "bash",
+        f"{root}/fix-123",
+    ]
+    assert calls[3][-8:] == [
+        "env",
+        *env,
+        "bash",
+        "-c",
+        'cd "$1" && source .venv/bin/activate && exec /bin/zsh',
+        "bash",
+        f"{root}/fix-123",
+    ]
+    assert calls[4][-6:] == ["env", *env, "ve", "rm", "fix-123"]
+
+
+def test_dev_worktree_rejects_path_like_name(monkeypatch, capsys):
+    monkeypatch.setattr(
+        workflow,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError()),
+    )
+
+    rc = main(
+        [
+            "dev",
+            "worktree",
+            "sync",
+            "../other-user",
+            "--cluster",
+            str(CLUSTER),
+            "--namespace",
+            "workload-ns",
+            "--user",
+            "tester",
+        ]
+    )
+
+    assert rc == 2
+    assert "worktree name must start" in capsys.readouterr().err
+
+
+def test_named_dev_worktree_rejects_explicit_dev_paths(capsys):
+    rc = main(
+        [
+            "render",
+            "manifest",
+            str(MODEL),
+            "--cluster",
+            str(CLUSTER),
+            "--dev-worktree",
+            "fix-123",
+            "--dev-venv",
+            "/custom/venv",
+        ]
+    )
+
+    assert rc == 2
+    assert "cannot be combined" in capsys.readouterr().err
 
 
 def test_ready_waits_for_spec_roles_only(monkeypatch, tmp_path):
