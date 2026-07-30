@@ -1,0 +1,81 @@
+# Synthetic GB200 profile for documentation and tests.
+#
+# Copy this file into your private Manifesto config directory and adapt it to
+# your environment. Values here are examples, not a usable cluster inventory.
+name: example-gb200
+gpus_per_node: 4
+
+accelerators:
+  default: gb200
+  profiles:
+    gb200:
+      resource_name: nvidia.com/gpu
+      presence_label: nvidia.com/gpu.present
+      gpu_arch: gb200
+      torch_cuda_arch_list: "10.0+PTX"
+    b200:
+      resource_name: nvidia.com/gpu
+      presence_label: nvidia.com/gpu.present
+      gpu_arch: b200
+      torch_cuda_arch_list: "10.0+PTX"
+
+storage:
+  shared_volume:
+    persistentVolumeClaim:
+      claimName: example-shared-cache
+  shared_mount_path: /mnt/shared
+  local_nvme_path: /mnt/local
+
+logging:
+  pvc: example-shared-cache
+  mount_path: /mnt/shared
+  root: /mnt/shared/{user}/logs
+
+pod_defaults:
+  shm_size: 2Gi
+
+model_server_resources:
+  cpu_per_gpu: "8"
+  memory_per_gpu: 128Gi
+
+paths:
+  user_root: /mnt/shared/{user}
+  cache_root: /mnt/shared/{user}/jit-cache/{gpu_arch}/{cuda}/{cache_key}/{release}
+
+dev:
+  venv: /mnt/shared/{user}/vllm-venv
+  source: /mnt/shared/{user}/vllm-dev
+
+fabric:
+  # Leave device selection to the runtime in this synthetic profile.
+  ucx_net_devices: ""
+  default_profile: standard
+  expert_parallel_profiles:
+    decode: deepep_decode
+    prefill: deepep_prefill
+  default_env:
+    TRITON_LIBCUDA_PATH: /usr/lib64
+    VLLM_ENGINE_READY_TIMEOUT_S: "1800"
+  profiles:
+    standard: {}
+    deepep_decode:
+      env:
+        VLLM_USE_NCCL_SYMM_MEM: "1"
+        NCCL_CUMEM_ENABLE: "1"
+        NCCL_MNNVL_ENABLE: "1"
+        NVSHMEM_DISABLE_CUDA_VMM: "0"
+        NCCL_NVLS_ENABLE: "1"
+        NVSHMEM_CUMEM_HANDLE_TYPE: FABRIC
+        VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: "1"
+        VLLM_DEEPEP_BUFFER_SIZE_MB: "0"
+      computed_env:
+        NVSHMEM_QP_DEPTH: max_concurrency * 2 + 2
+    deepep_prefill:
+      env:
+        VLLM_USE_NCCL_SYMM_MEM: "1"
+        NCCL_CUMEM_ENABLE: "1"
+        NCCL_MNNVL_ENABLE: "1"
+        NVSHMEM_DISABLE_CUDA_VMM: "0"
+        NCCL_NVLS_ENABLE: "0"
+        VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: "1"
+        VLLM_USE_DEEP_GEMM: "1"

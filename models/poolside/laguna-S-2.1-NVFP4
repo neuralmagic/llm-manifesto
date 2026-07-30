@@ -1,0 +1,23 @@
+# Laguna-S-2.1-NVFP4 on a single B200: TP=1 with tool calling enabled.
+release: laguna-nvfp4
+topology: aggregated
+
+model:
+  id: poolside/Laguna-S-2.1-NVFP4
+  label: Laguna-S-2.1-NVFP4
+  image_ref: vllm.standard
+
+cache: {gpu_arch: b200}
+routing: {kind: disabled}
+runtime: {sidecars: []}
+
+roles:
+  - name: decode
+    lws: {size: 1}
+    parallelism: {tp: 2, dp: false, ep: false}
+    resources: {cpu: "16", memory: 64Gi, gpus: 2, ephemeral_storage: 64Gi}
+    vllm:
+      trust-remote-code: true
+      enable-auto-tool-choice: true
+      tool-call-parser: hermes
+      enable-prompt-tokens-details: true

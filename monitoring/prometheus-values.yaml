@@ -1,0 +1,250 @@
+server:
+  persistentVolume:
+    enabled: false
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: kubernetes.io/arch
+            operator: In
+            values: ["amd64"]
+
+extraScrapeConfigs: |
+  - job_name: 'vllm-decode'
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_llm_d_ai_role]
+        regex: decode
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_container_name]
+        regex: vllm
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_container_port_number]
+        regex: '820.'
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        target_label: node
+      - source_labels: [__meta_kubernetes_pod_label_llm_d_ai_model]
+        target_label: model
+      - source_labels: [__meta_kubernetes_pod_container_port_number]
+        regex: '820(.)'
+        target_label: rank
+        replacement: '${1}'
+    scrape_interval: 1s
+    metrics_path: /metrics
+
+  - job_name: 'vllm-prefill'
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_llm_d_ai_role]
+        regex: prefill
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_container_name]
+        regex: vllm
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_container_port_number]
+        regex: '800.'
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        target_label: node
+      - source_labels: [__meta_kubernetes_pod_label_llm_d_ai_model]
+        target_label: model
+      - source_labels: [__meta_kubernetes_pod_container_port_number]
+        regex: '800(.)'
+        target_label: rank
+        replacement: '${1}'
+    scrape_interval: 1s
+    metrics_path: /metrics
+
+  - job_name: 'nyann-bench'
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_container_name]
+        regex: nyann-bench
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_container_port_number]
+        regex: '9090'
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        target_label: node
+      - source_labels: [__meta_kubernetes_pod_label_batch_kubernetes_io_job_completion_index]
+        target_label: worker
+    scrape_interval: 1s
+    metrics_path: /metrics
+
+  - job_name: 'epp'
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_inferencepool]
+        regex: .+
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_ip]
+        target_label: __address__
+        replacement: '${1}:9090'
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_label_inferencepool]
+        target_label: inferencepool
+    scrape_interval: 1s
+    metrics_path: /metrics
+
+  - job_name: 'dcgm-exporter'
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_container_name]
+        regex: dcgm-exporter
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_container_port_number]
+        regex: '9400'
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        target_label: node
+      - source_labels: [__meta_kubernetes_pod_label_llm_d_ai_role]
+        target_label: role
+      - source_labels: [__meta_kubernetes_pod_label_llm_d_ai_model]
+        target_label: model
+    scrape_interval: 2s
+    metrics_path: /metrics
+
+  - job_name: 'node-exporter-ib'
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_container_name]
+        regex: node-exporter
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_container_port_number]
+        regex: '9100'
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        target_label: node
+      - source_labels: [__meta_kubernetes_pod_label_llm_d_ai_role]
+        target_label: role
+    scrape_interval: 15s
+    metrics_path: /metrics
+
+serverFiles:
+  recording_rules.yml:
+    groups:
+      - name: deepep_latency
+        interval: 5s
+        rules:
+          - record: deepep:dispatch_p99_seconds
+            expr: histogram_quantile(0.99, sum(rate(vllm:deepep_dispatch_duration_seconds_bucket[10s])) by (le, pod))
+          - record: deepep:dispatch_p95_seconds
+            expr: histogram_quantile(0.95, sum(rate(vllm:deepep_dispatch_duration_seconds_bucket[10s])) by (le, pod))
+          - record: deepep:dispatch_p75_seconds
+            expr: histogram_quantile(0.75, sum(rate(vllm:deepep_dispatch_duration_seconds_bucket[10s])) by (le, pod))
+          - record: deepep:dispatch_p50_seconds
+            expr: histogram_quantile(0.50, sum(rate(vllm:deepep_dispatch_duration_seconds_bucket[10s])) by (le, pod))
+          - record: deepep:dispatch_p25_seconds
+            expr: histogram_quantile(0.25, sum(rate(vllm:deepep_dispatch_duration_seconds_bucket[10s])) by (le, pod))
+          - record: deepep:combine_p99_seconds
+            expr: histogram_quantile(0.99, sum(rate(vllm:deepep_combine_duration_seconds_bucket[10s])) by (le, pod))
+          - record: deepep:combine_p95_seconds
+            expr: histogram_quantile(0.95, sum(rate(vllm:deepep_combine_duration_seconds_bucket[10s])) by (le, pod))
+          - record: deepep:combine_p75_seconds
+            expr: histogram_quantile(0.75, sum(rate(vllm:deepep_combine_duration_seconds_bucket[10s])) by (le, pod))
+          - record: deepep:combine_p50_seconds
+            expr: histogram_quantile(0.50, sum(rate(vllm:deepep_combine_duration_seconds_bucket[10s])) by (le, pod))
+          - record: deepep:combine_p25_seconds
+            expr: histogram_quantile(0.25, sum(rate(vllm:deepep_combine_duration_seconds_bucket[10s])) by (le, pod))
+      - name: dp_sync_latency
+        interval: 5s
+        rules:
+          - record: dp_sync:p99_seconds
+            expr: histogram_quantile(0.99, sum(rate(vllm:dp_sync_duration_seconds_bucket[10s])) by (le, pod))
+          - record: dp_sync:p95_seconds
+            expr: histogram_quantile(0.95, sum(rate(vllm:dp_sync_duration_seconds_bucket[10s])) by (le, pod))
+          - record: dp_sync:p75_seconds
+            expr: histogram_quantile(0.75, sum(rate(vllm:dp_sync_duration_seconds_bucket[10s])) by (le, pod))
+          - record: dp_sync:p50_seconds
+            expr: histogram_quantile(0.50, sum(rate(vllm:dp_sync_duration_seconds_bucket[10s])) by (le, pod))
+          - record: dp_sync:p25_seconds
+            expr: histogram_quantile(0.25, sum(rate(vllm:dp_sync_duration_seconds_bucket[10s])) by (le, pod))
+      - name: nvlink_errors
+        interval: 15s
+        rules:
+          - record: nvlink:replay_error_rate_per_gpu
+            expr: sum(rate(DCGM_FI_DEV_NVLINK_REPLAY_ERROR_COUNT_TOTAL[2m])) by (node, gpu)
+          - record: nvlink:crc_error_rate_per_gpu
+            expr: sum(rate(DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL[2m]) + rate(DCGM_FI_DEV_NVLINK_CRC_DATA_ERROR_COUNT_TOTAL[2m])) by (node, gpu)
+  alerting_rules.yml:
+    groups:
+      - name: mnnvl_alerts
+        rules:
+          - alert: DeepEPDispatchP99High
+            expr: deepep:dispatch_p99_seconds > 0.001
+            for: 1m
+            labels:
+              severity: warning
+            annotations:
+              summary: "DeepEP dispatch P99 above 1ms on {{ $labels.pod }}"
+              description: "Dispatch P99 is {{ $value | humanizeDuration }}. Check NVLink health."
+          - alert: DeepEPCombineP99High
+            expr: deepep:combine_p99_seconds > 0.005
+            for: 1m
+            labels:
+              severity: warning
+            annotations:
+              summary: "DeepEP combine P99 above 5ms on {{ $labels.pod }}"
+              description: "Combine P99 is {{ $value | humanizeDuration }}."
+          - alert: NVLinkReplayErrors
+            expr: nvlink:replay_error_rate_per_gpu > 0
+            for: 30s
+            labels:
+              severity: warning
+            annotations:
+              summary: "NVLink replay errors on {{ $labels.node }} GPU {{ $labels.gpu }}"
+              description: "Replay error rate {{ $value }}/sec. May cause collective tail latency."
+          - alert: NVLinkCRCErrors
+            expr: nvlink:crc_error_rate_per_gpu > 0
+            for: 30s
+            labels:
+              severity: critical
+            annotations:
+              summary: "NVLink CRC errors on {{ $labels.node }} GPU {{ $labels.gpu }}"
+              description: "CRC error rate {{ $value }}/sec. Potential hardware issue."
+
+alertmanager:
+  enabled: true
+  persistentVolume:
+    enabled: false
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: kubernetes.io/arch
+            operator: In
+            values: ["amd64"]
+kube-state-metrics:
+  enabled: false
+prometheus-node-exporter:
+  enabled: false
+prometheus-pushgateway:
+  enabled: true
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: kubernetes.io/arch
+            operator: In
+            values: ["amd64"]

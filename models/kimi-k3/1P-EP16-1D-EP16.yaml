@@ -1,0 +1,77 @@
+# Kimi K3 disaggregated serving on GB200 NVL72, based on the vLLM Recipes
+# four-node PD cluster: one four-node EP16 prefill pool plus one four-node EP16
+# decode pool, 8 nodes / 32 GPUs total. llm-d provides external load balancing
+# across both roles' DP ranks.
+release: kimi-k3-1p-ep16-1d-ep16
+topology: pd
+accelerator: gb200
+
+model:
+  id: moonshotai/Kimi-K3
+  image: vllm/vllm-openai:kimi-k3
+
+roles:
+  - name: decode
+    lws: {size: 4}
+    parallelism: {dp: 16, ep: true}
+    fabric_profile: standard
+    kv_transfer_config:
+      kv_connector: NixlConnector
+      kv_role: kv_both
+      kv_load_failure_policy: fail
+    env:
+      VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION: "1"
+      VLLM_SSM_CONV_STATE_LAYOUT: DS
+      UCX_TLS: rc,cuda_copy
+      NCCL_CUMEM_ENABLE: "1"
+      NCCL_MNNVL_ENABLE: "1"
+      NCCL_NVLS_ENABLE: "0"
+    vllm:
+      load_format: fastsafetensors
+      trust_remote_code: true
+      gpu_memory_utilization: "0.95"
+      max_model_len: 1048576
+      max_num_seqs: 32
+      max_num_batched_tokens: 32
+      moe_backend: deep_gemm_mega_moe
+      kv_cache_dtype: fp8
+      attention_config: {use_prefill_query_quantization: true}
+      no_disable_hybrid_kv_cache_manager: true
+      no_enable_prefix_caching: true
+      no_enable_flashinfer_autotune: true
+      compilation_config: {cudagraph_mode: FULL_DECODE_ONLY}
+      enable_auto_tool_choice: true
+      tool_call_parser: kimi_k3
+      reasoning_parser: kimi_k3
+
+  - name: prefill
+    lws: {size: 4}
+    parallelism: {dp: 16, ep: true}
+    fabric_profile: standard
+    kv_transfer_config:
+      kv_connector: NixlConnector
+      kv_role: kv_both
+      kv_load_failure_policy: fail
+    env:
+      VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION: "1"
+      VLLM_SSM_CONV_STATE_LAYOUT: DS
+      UCX_TLS: rc,cuda_copy
+      NCCL_CUMEM_ENABLE: "1"
+      NCCL_MNNVL_ENABLE: "1"
+      NCCL_NVLS_ENABLE: "0"
+    vllm:
+      load_format: fastsafetensors
+      trust_remote_code: true
+      gpu_memory_utilization: "0.95"
+      max_model_len: 1048576
+      max_num_batched_tokens: 16384
+      moe_backend: auto
+      kv_cache_dtype: fp8
+      attention_config: {use_prefill_query_quantization: true}
+      no_disable_hybrid_kv_cache_manager: true
+      enable_prefix_caching: true
+      no_enable_flashinfer_autotune: true
+      enforce_eager: true
+      enable_auto_tool_choice: true
+      tool_call_parser: kimi_k3
+      reasoning_parser: kimi_k3

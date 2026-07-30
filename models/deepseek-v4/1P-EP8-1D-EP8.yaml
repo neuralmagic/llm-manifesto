@@ -1,0 +1,17 @@
+# 1 prefill EP8 worker plus 1 decode EP8 worker, 4 nodes / 16 GPUs.
+extends: wide-ep-base.yaml
+release: wide-ep-1p-ep8-1d-ep8
+
+roles:
+  prefill:
+    lws: {replicas: 1}
+  decode:
+    workload_name: vllm-ep8-decode
+    lws: {size: 2}
+    parallelism: {tp: 1, dp: 8, ep: true}
+    vllm:
+      moe_backend: deep_gemm_mega_moe
+      all2all_backend: $delete
+      enable_eplb: false
+      eplb_config: $delete
+      kernel_config: $delete

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Import vLLM Recipe"
+  short_description: "Translate vLLM recipes into Manifesto specs"
+  default_prompt: "Use $import-vllm-recipe to import this vLLM recipe into a validated Manifesto model spec."

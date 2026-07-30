@@ -1,0 +1,31 @@
+# Synthetic stateless B200 profile for minimal direct-vLLM deployments.
+#
+# No shared, host-cache, local-NVMe, logging, or development filesystem is
+# declared. Libraries use container-local defaults and logs stream to stdout.
+name: example-stateless-b200
+gpus_per_node: 8
+
+accelerators:
+  default: b200
+  profiles:
+    b200:
+      resource_name: nvidia.com/gpu
+      presence_label: nvidia.com/gpu.present
+      gpu_arch: b200
+      torch_cuda_arch_list: "10.0+PTX"
+
+storage:
+  local_nvme_path: null
+
+pod_defaults:
+  shm_size: 2Gi
+
+model_server_resources:
+  cpu_per_gpu: "8"
+  memory_per_gpu: 32Gi
+
+fabric:
+  ucx_net_devices: ""
+  default_profile: standard
+  profiles:
+    standard: {}

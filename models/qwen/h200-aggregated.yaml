@@ -1,0 +1,20 @@
+# Qwen H200 aggregated deployment: one 8-GPU pod with external DP routing.
+release: qwen-h200
+topology: aggregated
+
+model:
+  id: Qwen/Qwen3.6-35B-A3B
+  label: Qwen3.6-35B-A3B
+  image_ref: vllm.standard
+
+accelerator: h200
+routing: {kind: load_aware, target_role: decode}
+runtime: {sidecars: []}
+
+roles:
+  - name: decode
+    lws: {size: 1}
+    parallelism: {tp: 1, dp: 4, ep: true}
+    resources: {cpu: "32", memory: 512Gi, gpus: 4, ephemeral_storage: 128Gi}
+    vllm:
+      trust_remote_code: true

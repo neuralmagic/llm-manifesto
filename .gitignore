@@ -1,0 +1,58 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Temporary files
+.tmp/
+*.tmp
+*.temp
+
+# Generated kustomization (created at runtime by Justfile)
+gb200/kustomization.yaml
+
+# Results and output directories
+results-*/
+guide-llm-results/
+traces/
+
+# Python
+uv.lock
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local agent configuration and operational runbooks
+.claude/*
+
+# Real cluster profiles belong in the private user catalog. Only the synthetic
+# examples are publishable.
+clusters/*.yaml
+!clusters/example-*.yaml
+dev_env/
+rendered/
+*.rendered.yaml
+
+# Logs
+*.log
+logs/
+
+# Local scripts (may contain IPs, credentials, etc.)
+local/

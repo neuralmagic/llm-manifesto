@@ -1,0 +1,53 @@
+# Synthetic H200 profile for documentation and tests.
+#
+# Copy this file into your private Manifesto config directory and adapt it to
+# your environment. Do not commit real storage, network, scheduling, or
+# credential details to this repository.
+name: example-h200
+gpus_per_node: 8
+
+accelerators:
+  default: h200
+  profiles:
+    h200:
+      resource_name: nvidia.com/gpu
+      presence_label: nvidia.com/gpu.present
+      gpu_arch: h200
+      torch_cuda_arch_list: "9.0"
+
+cache:
+  hf_host_path: /var/cache/manifesto/huggingface
+  jit_host_path: /var/cache/manifesto/jit
+  hf_home: /var/cache/huggingface
+
+rdma:
+  resource_name: example.com/rdma
+  value: "1"
+
+pod_defaults:
+  shm_size: 2Gi
+
+model_server_resources:
+  cpu_per_gpu: "8"
+  memory_per_gpu: 128Gi
+
+paths:
+  user_root: /var/cache/manifesto/{user}
+  cache_root: /var/cache/manifesto/{user}/jit-cache/{gpu_arch}/{cuda}/{cache_key}/{release}
+
+dev:
+  venv: /var/cache/manifesto/{user}/vllm-venv
+  source: /var/cache/manifesto/{user}/vllm-dev
+
+fabric:
+  ucx_net_devices: ""
+  default_profile: standard
+  default_env:
+    CUDA_CACHE_PATH: /var/cache/manifesto/cuda
+    CCACHE_DIR: /var/cache/manifesto/ccache
+    HF_HUB_CACHE: /var/cache/huggingface
+    FLASHINFER_WORKSPACE_BASE: /var/cache/manifesto/flashinfer
+    TRITON_LIBCUDA_PATH: /usr/lib64
+    VLLM_ENGINE_READY_TIMEOUT_S: "1800"
+  profiles:
+    standard: {}

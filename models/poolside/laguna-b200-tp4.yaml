@@ -1,0 +1,23 @@
+# Laguna-S-2.1 on one four-GPU B200 node: TP=4, full native context, and
+# tool calling plus reasoning parsing enabled.
+release: laguna
+topology: aggregated
+
+model:
+  id: poolside/Laguna-S-2.1
+  label: Laguna-S-2.1
+  image_ref: vllm.standard
+
+routing: {kind: load_aware, target_role: decode}
+runtime: {sidecars: []}
+
+roles:
+  - name: decode
+    lws: {size: 1}
+    parallelism: {tp: 4, dp: false, ep: false}
+    resources: {cpu: "96", memory: 896Gi, gpus: 4, ephemeral_storage: 128Gi}
+    vllm:
+      trust_remote_code: true
+      enable_auto_tool_choice: true
+      tool_call_parser: poolside_v1
+      reasoning_parser: poolside_v1

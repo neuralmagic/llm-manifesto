@@ -1,0 +1,19 @@
+# Qwen aggregated smoke-test deployment for a simple single-role vLLM stack.
+release: qwen
+topology: aggregated
+
+model:
+  id: Qwen/Qwen3.6-35B-A3B
+  label: Qwen3.6-35B-A3B
+  image_ref: vllm.standard
+
+routing: {kind: load_aware, target_role: decode}
+runtime: {sidecars: []}
+
+roles:
+  - name: decode
+    lws: {size: 1}
+    parallelism: {tp: 1, dp: false, ep: false}
+    resources: {cpu: "8", memory: 64Gi, gpus: 1, ephemeral_storage: 64Gi}
+    vllm:
+      trust_remote_code: true

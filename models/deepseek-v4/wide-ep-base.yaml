@@ -1,0 +1,92 @@
+# Example DeepSeek V4 wide-EP base for four-GPU nodes.
+topology: pd
+
+model:
+  id: deepseek-ai/DeepSeek-V4-Pro
+  label: DeepSeek-V4-Pro
+  image_ref: vllm.standard
+
+routing: {kind: pd, target_role: decode}
+runtime: {sidecars: [dcgm-exporter, node-exporter]}
+
+vars:
+  max_concurrency: 1024
+  mtp_size: 1
+
+roles:
+  - name: decode
+    workload_name: vllm-ep16-decode
+    lws: {size: 4, replicas: 1}
+    parallelism: {tp: 1, dp: 16, ep: true}
+    kv_transfer_config:
+      kv_connector: NixlConnector
+      kv_role: kv_both
+      kv_buffer_device: cuda
+      kv_load_failure_policy: fail
+    computed:
+      env: {MAX_TOKENS: max_concurrency}
+      vllm:
+        max_num_batched_tokens: max_concurrency * mtp_size
+        max_num_seqs: max_concurrency
+        max_cudagraph_capture_size: max_concurrency
+    env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_USE_BREAKABLE_CUDAGRAPH: "1"
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "120"
+      ACTIVATION_V2_GRID_Y: "512"
+      VLLM_COMPUTE_NANS_IN_LOGITS: "1"
+      VLLM_RANDOMIZE_DP_DUMMY_INPUTS: "1"
+      VLLM_USE_DEEP_GEMM: "1"
+      DEEPEP_METRICS_ENABLED: "1"
+    resources:
+      ephemeral_storage: 128Gi
+    vllm:
+      load_format: auto
+      gpu_memory_utilization: "0.85"
+      trust_remote_code: true
+      no_disable_hybrid_kv_cache_manager: true
+      attention_config.use_fp4_indexer_cache: "True"
+      compilation_config: {cudagraph_mode: FULL_DECODE_ONLY, custom_ops: [all]}
+      enable_force_include_usage: true
+      enable_eplb: true
+      eplb_config:
+        window_size: "100"
+        step_interval: "3000"
+        num_redundant_experts: "32"
+        log_balancedness: "False"
+        use_async: "True"
+        communicator: nixl
+        log_balancedness_interval: "1000"
+      kernel_config: {enable_flashinfer_autotune: false}
+      all2all_backend: deepep_v2
+      kv_cache_dtype: fp8
+      block_size: 256
+      enable_cumem_allocator: true
+      stream_interval: 50
+
+  - name: prefill
+    workload_name: vllm-ep8-prefill
+    lws: {size: 2, replicas: 1}
+    parallelism: {tp: 1, dp: 8, ep: true}
+    kv_transfer_config:
+      kv_connector: NixlConnector
+      kv_role: kv_both
+      kv_buffer_device: cuda
+      kv_load_failure_policy: fail
+    env:
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "120"
+      VLLM_COMPUTE_NANS_IN_LOGITS: "1"
+      VLLM_RANDOMIZE_DP_DUMMY_INPUTS: "1"
+      VLLM_USE_DEEP_GEMM: "1"
+    resources:
+      ephemeral_storage: 128Gi
+    vllm:
+      load_format: auto
+      trust_remote_code: true
+      moe_backend: deep_gemm_mega_moe
+      gpu_memory_utilization: "0.85"
+      kv_cache_dtype: fp8
+      block_size: 256
+      no_disable_hybrid_kv_cache_manager: true
+      attention_config.use_fp4_indexer_cache: "True"
+      enable_force_include_usage: true

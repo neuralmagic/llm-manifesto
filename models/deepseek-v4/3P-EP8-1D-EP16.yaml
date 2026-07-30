@@ -1,0 +1,7 @@
+# 3 prefill EP8 workers plus 1 decode EP16 worker, 10 nodes / 40 GPUs.
+extends: wide-ep-base.yaml
+release: wide-ep-3p-ep8-1d-ep16
+
+roles:
+  prefill:
+    lws: {replicas: 3}
