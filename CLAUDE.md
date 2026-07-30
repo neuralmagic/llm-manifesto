@@ -7,11 +7,28 @@ this repository.
 
 - Use the `manifesto` CLI directly for rendering and model-server lifecycle
   operations.
-- Keep operational details out of the repository. Do not commit real cluster or
-  context names, API endpoints, namespaces, node names or addresses, internal
-  registry locations, queue names, user-specific paths, or similar environment
-  identifiers. Keep them in private user configuration and use synthetic names
-  or placeholders in code, tests, documentation, commits, and pull requests.
+- Keep private and operational details out of all public project surfaces. This
+  includes code, tests, documentation, generated manifests, logs, benchmark
+  results, screenshots, commit messages, issue titles and comments, pull request
+  descriptions and comments, and review feedback.
+- Never publish credentials or credential material, including API tokens,
+  passwords, private keys, certificates, kubeconfigs, cloud configuration,
+  registry authentication, or secret values. References to Kubernetes Secret
+  names and keys are acceptable only when they are synthetic or intentionally
+  public and contain no secret value.
+- Do not publish real cluster or context names, API endpoints, namespaces, node
+  names or addresses, internal registry locations, queue names, storage or
+  resource claim names, network interfaces, user-specific paths, or similar
+  environment identifiers. Keep them in private user configuration and use
+  clearly synthetic placeholders such as `example.com`, RFC 5737 IP addresses,
+  and example resource names.
+- Before opening or updating an issue or pull request, inspect the complete diff,
+  staged and untracked files, generated output, and commit messages for private
+  data. Do not paste raw logs, manifests, command output, or screenshots without
+  reviewing and redacting them first.
+- If sensitive material is committed or posted, stop sharing it, revoke or rotate
+  affected credentials, remove it from all reachable history and public text,
+  and report the exposure through the appropriate private security channel.
 
 ## Repository Overview
 
