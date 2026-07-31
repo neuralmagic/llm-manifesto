@@ -569,6 +569,31 @@ manifesto completion fish | source  # fish
 For scripts, `manifesto servers --output name` prints one instance ID per line,
 and `--output json` includes the exact resources associated with each instance.
 
+### Slow clusters
+
+`manifesto servers` and `manifesto stop` find live objects by listing every
+Manifesto-managed resource type. Those lists run concurrently, one request per
+type, so discovery costs roughly one API round trip of wall-clock time instead of
+one per type. API resource discovery is fetched once per command.
+
+Discovery reads are bounded and retried on transient faults. Tune them when an
+API server is unusually slow or flaky:
+
+```bash
+MANIFESTO_KUBECTL_TIMEOUT=300  # seconds per read attempt; 0 disables the bound
+MANIFESTO_KUBECTL_RETRIES=4    # extra attempts after a transient failure
+MANIFESTO_TRACE=1              # log every kubectl invocation and its duration
+```
+
+`MANIFESTO_TRACE=1` is the fastest way to find which call is slow:
+
+```bash
+MANIFESTO_TRACE=1 manifesto stop --instance ID
+```
+
+Shell completion of live instance IDs uses a short, non-retrying timeout, so a
+slow cluster yields no candidates instead of stalling the prompt.
+
 Examples:
 
 ```bash

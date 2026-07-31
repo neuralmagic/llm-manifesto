@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+import contextlib
 import json
 import os
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -47,6 +50,40 @@ MANAGED_RESOURCE_TYPES = {
 }
 POD_RESOURCE_TYPE = "pods"
 MANIFESTO_SELECTOR = "app.kubernetes.io/name=manifesto"
+
+# Discovery talks to clusters whose API round trips can be seconds long, so every
+# read is bounded, retried on transient faults, and fanned out across resource
+# types instead of walking them one at a time inside a single kubectl process.
+DEFAULT_KUBECTL_TIMEOUT = 120.0
+DEFAULT_KUBECTL_RETRIES = 2
+# One worker per managed type, so adding a type never reintroduces a serial round.
+MAX_DISCOVERY_WORKERS = len(MANAGED_RESOURCE_TYPES) + 1
+COMPLETION_KUBECTL_TIMEOUT = 3.0
+
+TRANSIENT_KUBECTL_ERRORS = (
+    "connection refused",
+    "connection reset",
+    "context deadline exceeded",
+    "client.timeout",
+    "i/o timeout",
+    "tls handshake timeout",
+    "unexpected eof",
+    "etcdserver: request timed out",
+    "the server is currently unable to handle the request",
+    "the server was unable to return a response in the time allotted",
+    "too many requests",
+    "temporary failure in name resolution",
+    "no route to host",
+)
+# Deliberately narrow: a generic 404 can also mean a CRD is mid-upgrade, and
+# treating that as "no such objects" would hide live resources from teardown.
+MISSING_RESOURCE_ERRORS = ("the server doesn't have a resource type",)
+
+TRACE_OFF_VALUES = frozenset({"", "0", "false", "no", "off"})
+
+_UNSET = object()
+_kubectl_limits: dict[str, float | int | None] = {}
+_discovery_types: tuple[str, ...] | None = None
 
 
 class WorkflowError(RuntimeError):
@@ -112,14 +149,17 @@ class LiveResource:
         return self.labels.get("app.kubernetes.io/instance")
 
     @property
-    def kubectl_ref(self) -> str:
+    def resource_type(self) -> str:
         if self.kind == "Pod":
-            resource_type = POD_RESOURCE_TYPE
-        else:
-            resource_type = MANAGED_RESOURCE_TYPES.get((self.api_version, self.kind))
+            return POD_RESOURCE_TYPE
+        resource_type = MANAGED_RESOURCE_TYPES.get((self.api_version, self.kind))
         if not resource_type:
             raise WorkflowError(f"unsupported managed resource: {self.api_version} {self.kind}")
-        return f"{resource_type}/{self.name}"
+        return resource_type
+
+    @property
+    def kubectl_ref(self) -> str:
+        return f"{self.resource_type}/{self.name}"
 
 
 @dataclass(frozen=True)
@@ -650,26 +690,150 @@ def dev_stop(args, *, config: RuntimeConfig | None = None) -> int:
     return run([*config.kubectl(), "delete", f"pod/{pod_name}", "--ignore-not-found=true"])
 
 
-def discover_live_resources(config: RuntimeConfig, *, instance_id: str | None = None) -> list[LiveResource]:
-    available = set(
-        capture(
-            ["kubectl", "api-resources", "--namespaced=true", "--verbs=list,delete", "-o", "name"]
-        ).splitlines()
-    )
-    resource_types = sorted(set(MANAGED_RESOURCE_TYPES.values()) & available)
-    if POD_RESOURCE_TYPE in available:
-        resource_types.append(POD_RESOURCE_TYPE)
-    if not resource_types:
-        raise WorkflowError("No Manifesto-managed Kubernetes resource types are available in this cluster.")
+def discovery_resource_types() -> tuple[str, ...]:
+    """Return the resource types worth listing for Manifesto-managed objects.
 
+    ``kubectl api-resources`` is a full discovery round trip, so the answer is
+    memoized for the life of the process. It is also only usable when it exits
+    cleanly: when any API group fails to answer, kubectl prints the groups it did
+    reach and exits nonzero, and trusting that truncated list would silently drop
+    managed types from teardown. Anything short of a clean listing therefore falls
+    back to the complete managed set, which costs nothing extra in wall clock
+    because the lists run concurrently, and lets unserved types drop out per query.
+    """
+
+    global _discovery_types
+    if _discovery_types is not None:
+        return _discovery_types
+
+    timeout = kubectl_timeout()
+    try:
+        listing = capture(
+            [
+                "kubectl",
+                "api-resources",
+                "--namespaced=true",
+                "--verbs=list,delete",
+                "-o",
+                "name",
+                *_request_timeout_flag(timeout),
+            ],
+            timeout=timeout,
+            # Retrying buys nothing: the fallback below is already free.
+            retries=0,
+        )
+    except WorkflowError:
+        listing = ""
+    available = {line.strip() for line in listing.splitlines() if line.strip()}
+
+    known = set(MANAGED_RESOURCE_TYPES.values())
+    # Every cluster serves pods, so their absence means the listing is unusable
+    # rather than that the cluster genuinely lacks Manifesto-managed types.
+    if POD_RESOURCE_TYPE in available:
+        resource_types = [*sorted(known & available), POD_RESOURCE_TYPE]
+    else:
+        print(
+            "Warning: could not enumerate cluster API resources; "
+            "querying every Manifesto-managed type instead.",
+            file=sys.stderr,
+        )
+        resource_types = [*sorted(known), POD_RESOURCE_TYPE]
+    _discovery_types = tuple(resource_types)
+    return _discovery_types
+
+
+def _objects_from_list(raw: str) -> list[dict]:
+    """Parse a kubectl list into its items.
+
+    A payload that is not a list is an error rather than an empty result: this
+    feeds teardown, where "could not read it" must never look like "nothing there".
+    """
+
+    payload = json.loads(raw)
+    if not isinstance(payload, dict) or "items" not in payload:
+        raise WorkflowError("kubectl returned invalid discovery data: expected a list")
+    # kubectl rewraps single-type output as a v1 List whose items carry their own
+    # kind. Typed lists (PodList and friends) elide it; restore it from the list
+    # kind so a hand-run or piped manifest parses the same way.
+    list_kind = payload.get("kind", "")
+    item_kind = list_kind[:-4] if list_kind.endswith("List") and list_kind != "List" else ""
+    item_api_version = payload.get("apiVersion", "") if item_kind else ""
+    objects = []
+    for item in payload["items"] or []:
+        if item_kind and not item.get("kind"):
+            item = {
+                **item,
+                "kind": item_kind,
+                "apiVersion": item.get("apiVersion") or item_api_version,
+            }
+        objects.append(item)
+    return objects
+
+
+def list_objects(
+    config: RuntimeConfig,
+    resource_types: tuple[str, ...],
+    selector: str,
+) -> list[dict]:
+    """List each resource type concurrently and merge the results.
+
+    ``kubectl get a,b,c`` issues one LIST per type sequentially, so a namespace
+    holding a dozen managed types costs a dozen serial round trips. One process
+    per type turns that into a single round trip of wall-clock time.
+    """
+
+    resource_types = tuple(resource_types)
+    if not resource_types:
+        return []
+    timeout = kubectl_timeout()
+    retries = kubectl_retries()
+
+    def fetch(resource_type: str) -> list[dict]:
+        raw = capture(
+            [
+                *config.kubectl(),
+                "get",
+                resource_type,
+                "-l",
+                selector,
+                "-o",
+                "json",
+                *_request_timeout_flag(timeout),
+            ],
+            timeout=timeout,
+            retries=retries,
+            # A type this cluster does not serve means "no such objects"; any
+            # other failure must surface rather than read as an empty namespace.
+            tolerate=MISSING_RESOURCE_ERRORS,
+        )
+        if not raw.strip():
+            return []
+        try:
+            return _objects_from_list(raw)
+        except json.JSONDecodeError as exc:
+            raise WorkflowError(
+                f"kubectl returned invalid discovery data for {resource_type}: {exc}"
+            ) from exc
+
+    workers = min(len(resource_types), MAX_DISCOVERY_WORKERS)
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=workers, thread_name_prefix="manifesto-get"
+    ) as pool:
+        return [obj for group in pool.map(fetch, resource_types) for obj in group]
+
+
+def discover_live_resources(
+    config: RuntimeConfig,
+    *,
+    instance_id: str | None = None,
+    resource_types: tuple[str, ...] | None = None,
+) -> list[LiveResource]:
+    if resource_types is None:
+        resource_types = discovery_resource_types()
     selector = MANIFESTO_SELECTOR
     if instance_id:
         selector += f",app.kubernetes.io/instance={instance_id}"
-    raw = capture([*config.kubectl(), "get", ",".join(resource_types), "-l", selector, "-o", "json"])
-    try:
-        objects = json.loads(raw).get("items", [])
-    except (AttributeError, json.JSONDecodeError) as exc:
-        raise WorkflowError(f"kubectl returned invalid discovery data: {exc}") from exc
+    objects = list_objects(config, resource_types, selector)
     return [LiveResource.from_object(obj) for obj in objects]
 
 
@@ -698,15 +862,13 @@ def servers(args) -> int:
         print(json.dumps([record.as_dict() for record in records], indent=2))
         return 0
 
-    print_server_table(records)
+    print(format_server_table(records))
     if args.instance and records:
-        print("\nResources:")
-        for resource in sorted(records[0].resources, key=lambda item: (item.kind, item.name)):
-            print(f"  {resource.kind:<20} {resource.name}")
+        print(f"\n{format_server_resources(records[0])}")
     return 0
 
 
-def print_server_table(records: list[ServerRecord], *, numbered: bool = False) -> None:
+def format_server_table(records: list[ServerRecord], *, numbered: bool = False) -> str:
     headers = ("#", "INSTANCE", "STATE", "MODEL", "ROLES", "PODS", "AGE") if numbered else (
         "INSTANCE",
         "STATE",
@@ -720,10 +882,24 @@ def print_server_table(records: list[ServerRecord], *, numbered: bool = False) -
         + (record.instance_id, record.state, record.model, record.roles, record.pod_readiness, record.age)
         for index, record in enumerate(records, start=1)
     ]
-    widths = [max(len(header), *(len(row[idx]) for row in rows)) for idx, header in enumerate(headers)]
-    print("  ".join(header.ljust(widths[idx]) for idx, header in enumerate(headers)).rstrip())
-    for row in rows:
-        print("  ".join(value.ljust(widths[idx]) for idx, value in enumerate(row)).rstrip())
+    widths = [
+        max(len(header), *(len(row[idx]) for row in rows)) if rows else len(header)
+        for idx, header in enumerate(headers)
+    ]
+    lines = ["  ".join(header.ljust(widths[idx]) for idx, header in enumerate(headers)).rstrip()]
+    lines.extend(
+        "  ".join(value.ljust(widths[idx]) for idx, value in enumerate(row)).rstrip() for row in rows
+    )
+    return "\n".join(lines)
+
+
+def format_server_resources(record: ServerRecord) -> str:
+    lines = ["Resources:"]
+    lines.extend(
+        f"  {resource.kind:<20} {resource.name}"
+        for resource in sorted(record.resources, key=lambda item: (item.kind, item.name))
+    )
+    return "\n".join(lines)
 
 
 def stop(args) -> int:
@@ -743,6 +919,7 @@ def stop(args) -> int:
                 "No server target provided. Pass SPEC or --instance ID; interactive selection requires a TTY.",
                 code=2,
             )
+        print(f"Looking for Manifesto servers in namespace {config.namespace}...", file=sys.stderr)
         records = group_servers(discover_live_resources(config))
         if not records:
             print(f"No running Manifesto servers found in namespace {config.namespace}.")
@@ -754,7 +931,9 @@ def stop(args) -> int:
         instance_id = selected.instance_id
         resources = list(selected.resources)
 
-    resources = resources if resources is not None else discover_live_resources(config, instance_id=instance_id)
+    if resources is None:
+        print(f"Looking up {instance_id} in namespace {config.namespace}...", file=sys.stderr)
+        resources = discover_live_resources(config, instance_id=instance_id)
     return delete_instance(config, instance_id, resources, now=args.now)
 
 
@@ -766,38 +945,33 @@ def pick_server(records: list[ServerRecord], config: RuntimeConfig) -> ServerRec
             )
             for record in records
         ]
-        preview = shlex.join(
-            [
-                sys.executable,
-                "-m",
-                "manifesto.cli",
-                "servers",
-                "--namespace",
-                config.namespace,
-                "--instance",
-                "{1}",
-            ]
-        )
-        proc = subprocess.run(
-            [
-                "fzf",
-                "--delimiter=\\t",
-                "--with-nth=1..",
-                "--header=INSTANCE  STATE  MODEL  ROLES  PODS  AGE",
-                f"--preview={preview}",
-                "--preview-window=right,55%",
-                "--prompt=Stop server> ",
-            ],
-            input="\n".join(lines) + "\n",
-            text=True,
-            stdout=subprocess.PIPE,
-        )
+        # Discovery already returned every resource, so previews read from disk
+        # rather than re-querying the cluster on each keystroke.
+        with tempfile.TemporaryDirectory(prefix="manifesto-preview-") as preview_dir:
+            for record in records:
+                (Path(preview_dir) / record.instance_id).write_text(
+                    format_server_resources(record)
+                )
+            proc = subprocess.run(
+                [
+                    "fzf",
+                    "--delimiter=\\t",
+                    "--with-nth=1..",
+                    "--header=INSTANCE  STATE  MODEL  ROLES  PODS  AGE",
+                    f"--preview=cat {shlex.quote(preview_dir)}/{{1}}",
+                    "--preview-window=right,55%",
+                    "--prompt=Stop server> ",
+                ],
+                input="\n".join(lines) + "\n",
+                text=True,
+                stdout=subprocess.PIPE,
+            )
         if proc.returncode != 0 or not proc.stdout.strip():
             return None
         instance_id = proc.stdout.split("\t", 1)[0].strip()
         return next((record for record in records if record.instance_id == instance_id), None)
 
-    print_server_table(records, numbered=True)
+    print(format_server_table(records, numbered=True))
     while True:
         choice = input(f"Select server to stop [1-{len(records)}] (q to cancel): ").strip()
         if choice.casefold() in {"q", "quit"}:
@@ -830,30 +1004,48 @@ def delete_instance(
         cmd.extend(["--grace-period=0", "--force"])
     rc = run(cmd) if top_level else 0
 
-    remaining = discover_live_resources(config, instance_id=instance_id)
     if rc:
-        print(f"Teardown incomplete for {instance_id}; resources still present:", file=sys.stderr)
-        for resource in sorted(remaining, key=lambda item: (item.kind, item.name)):
-            print(f"  {resource.kind}/{resource.name}", file=sys.stderr)
+        report_incomplete_teardown(config, instance_id)
         return rc
 
-    pods = sorted(resource.kubectl_ref for resource in remaining if resource.kind == "Pod")
+    # Controllers recreate pods, so this round only needs the pods themselves.
+    print("Checking for orphaned pods...", file=sys.stderr)
+    pods = sorted(
+        resource.kubectl_ref
+        for resource in discover_live_resources(
+            config, instance_id=instance_id, resource_types=(POD_RESOURCE_TYPE,)
+        )
+    )
     if pods:
         pod_cmd = [*config.kubectl(), "delete", *pods, "--ignore-not-found=true"]
         if now:
             pod_cmd.extend(["--grace-period=0", "--force"])
         rc = max(rc, run(pod_cmd))
 
-    leftovers = discover_live_resources(config, instance_id=instance_id)
-    if leftovers:
-        print(f"Teardown incomplete for {instance_id}; resources still present:", file=sys.stderr)
-        for resource in sorted(leftovers, key=lambda item: (item.kind, item.name)):
-            print(f"  {resource.kind}/{resource.name}", file=sys.stderr)
+    print("Verifying teardown...", file=sys.stderr)
+    if report_incomplete_teardown(config, instance_id):
         return rc or 1
     if rc:
         return rc
     print(f"Stopped {instance_id}.")
     return 0
+
+
+def report_incomplete_teardown(config: RuntimeConfig, instance_id: str) -> bool:
+    """Print any resources still present for the instance; return whether any were.
+
+    This is the last word on whether a teardown finished, so it re-reads the full
+    managed set rather than only the types seen before the delete. The lists run
+    concurrently, so breadth here costs one round trip, not one per type.
+    """
+
+    leftovers = discover_live_resources(config, instance_id=instance_id)
+    if not leftovers:
+        return False
+    print(f"Teardown incomplete for {instance_id}; resources still present:", file=sys.stderr)
+    for resource in sorted(leftovers, key=lambda item: (item.kind, item.name)):
+        print(f"  {resource.kind}/{resource.name}", file=sys.stderr)
+    return True
 
 
 def diff_file(args) -> int:
@@ -938,17 +1130,145 @@ def ready(
     return 1
 
 
-def run(cmd: list[str], *, input_text: str | None = None) -> int:
-    return subprocess.run(cmd, input=input_text, text=True).returncode
+def kubectl_timeout() -> float | None:
+    """Per-attempt wall-clock budget for a cluster read, or None to wait forever."""
 
-
-def capture(cmd: list[str], *, check: bool = True) -> str:
+    if "timeout" in _kubectl_limits:
+        return _kubectl_limits["timeout"]
+    raw = os.environ.get("MANIFESTO_KUBECTL_TIMEOUT", "").strip()
+    if not raw:
+        return DEFAULT_KUBECTL_TIMEOUT
     try:
-        proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except FileNotFoundError:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_KUBECTL_TIMEOUT
+    return value if value > 0 else None
+
+
+def kubectl_retries() -> int:
+    if "retries" in _kubectl_limits:
+        return int(_kubectl_limits["retries"] or 0)
+    raw = os.environ.get("MANIFESTO_KUBECTL_RETRIES", "").strip()
+    if not raw:
+        return DEFAULT_KUBECTL_RETRIES
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_KUBECTL_RETRIES
+
+
+@contextlib.contextmanager
+def kubectl_limits(*, timeout: float | None | object = _UNSET, retries: int | object = _UNSET):
+    """Temporarily override the read timeout and retry budget."""
+
+    previous = dict(_kubectl_limits)
+    if timeout is not _UNSET:
+        _kubectl_limits["timeout"] = timeout
+    if retries is not _UNSET:
+        _kubectl_limits["retries"] = retries
+    try:
+        yield
+    finally:
+        _kubectl_limits.clear()
+        _kubectl_limits.update(previous)
+
+
+def reset_caches() -> None:
+    """Drop memoized cluster discovery. Exposed for the CLI entrypoint and tests."""
+
+    global _discovery_types
+    _discovery_types = None
+
+
+def _request_timeout_flag(timeout: float | None) -> list[str]:
+    """Bound the HTTP request just inside the process deadline.
+
+    The headroom lets kubectl report its own diagnostic instead of being killed
+    mid-request and surfacing only a generic timeout.
+    """
+
+    if not timeout:
+        return []
+    return [f"--request-timeout={max(1, int(timeout * 0.9))}s"]
+
+
+def _trace(message: str) -> None:
+    if os.environ.get("MANIFESTO_TRACE", "").strip().casefold() not in TRACE_OFF_VALUES:
+        print(f"[manifesto] {message}", file=sys.stderr, flush=True)
+
+
+def _matches(stderr: str, markers: tuple[str, ...]) -> bool:
+    lowered = stderr.casefold()
+    return any(marker in lowered for marker in markers)
+
+
+def run(cmd: list[str], *, input_text: str | None = None) -> int:
+    started = time.monotonic()
+    rc = subprocess.run(cmd, input=input_text, text=True).returncode
+    _trace(f"{shlex.join(cmd)} -> rc={rc} in {time.monotonic() - started:.1f}s")
+    return rc
+
+
+def capture(
+    cmd: list[str],
+    *,
+    check: bool = True,
+    timeout: float | None | object = _UNSET,
+    retries: int = 0,
+    tolerate: tuple[str, ...] = (),
+) -> str:
+    """Run a command and return stdout, retrying transient cluster failures.
+
+    ``tolerate`` names error substrings that mean "nothing to report" rather than
+    "the read failed" — an unserved resource type, for instance.
+    """
+
+    if timeout is _UNSET:
+        timeout = kubectl_timeout()
+    attempt = 0
+    while True:
+        started = time.monotonic()
+        try:
+            proc = subprocess.run(
+                cmd,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+            )
+        except FileNotFoundError:
+            if check:
+                raise WorkflowError(f"command not found: {cmd[0]}")
+            return ""
+        except subprocess.TimeoutExpired:
+            elapsed = time.monotonic() - started
+            _trace(f"{shlex.join(cmd)} -> timeout after {elapsed:.1f}s")
+            if attempt < retries:
+                attempt += 1
+                time.sleep(min(2.0 ** attempt, 8.0))
+                continue
+            if check:
+                raise WorkflowError(
+                    f"timed out after {elapsed:.0f}s: {shlex.join(cmd)}\n"
+                    "Raise MANIFESTO_KUBECTL_TIMEOUT if this cluster is simply slow."
+                )
+            return ""
+
+        _trace(
+            f"{shlex.join(cmd)} -> rc={proc.returncode} in {time.monotonic() - started:.1f}s"
+        )
+        if proc.returncode == 0:
+            return proc.stdout
+        if tolerate and _matches(proc.stderr, tolerate):
+            # Swallowing a read must never be invisible on a teardown path.
+            _trace(f"tolerated: {proc.stderr.strip()}")
+            return ""
+        if attempt < retries and _matches(proc.stderr, TRANSIENT_KUBECTL_ERRORS):
+            attempt += 1
+            time.sleep(min(2.0 ** attempt, 8.0))
+            continue
         if check:
-            raise WorkflowError(f"command not found: {cmd[0]}")
-        return ""
-    if check and proc.returncode != 0:
-        raise WorkflowError(proc.stderr.strip() or f"command failed ({proc.returncode}): {shlex.join(cmd)}")
-    return proc.stdout
+            raise WorkflowError(
+                proc.stderr.strip() or f"command failed ({proc.returncode}): {shlex.join(cmd)}"
+            )
+        return proc.stdout
