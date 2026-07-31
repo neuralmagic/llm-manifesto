@@ -11,7 +11,7 @@ from manifesto.spec import load_spec
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL = ROOT / "models" / "kimi-k3" / "aggregated-tp8-ep8.yaml"
+MODEL = ROOT / "models" / "kimi-k3" / "aggregated-tp16-ep16.yaml"
 PD_MODEL = ROOT / "models" / "kimi-k3" / "1P-1D-DP4-TP4.yaml"
 CLUSTER = load_cluster(ROOT / "clusters" / "example-gb200.yaml")
 ACTIVE_PORTS = "inference.networking.k8s.io/active-ports"
@@ -67,7 +67,7 @@ def test_kimi_k3_rendered_pods_request_full_gb200_nodes():
     ][0]
     assert clique_term["topologyKey"] == "nvidia.com/gpu.clique"
     assert clique_term["labelSelector"]["matchLabels"] == {
-        "app.kubernetes.io/instance": "tester-kimi-k3-aggregated-tp8-ep8",
+        "app.kubernetes.io/instance": "tester-kimi-k3-aggregated-tp16-ep16",
         "llm-d.ai/role": "decode",
     }
     # Co-location is per LWS group, not per role, so replicas stay independent.
@@ -133,7 +133,7 @@ def _pd_objects() -> list[dict]:
     return render(load_spec(PD_MODEL, CLUSTER), user="tester", cluster=CLUSTER)
 
 
-def test_kimi_k3_pd_tep8_dep16_shape():
+def test_kimi_k3_pd_dp4_tp4_shape():
     spec = load_spec(PD_MODEL, CLUSTER)
     prefill = spec.role("prefill")
     decode = spec.role("decode")

@@ -1,6 +1,6 @@
 # Kimi K3 TEP on GB200 NVL72: TP16/EP16,
 # 1 aggregated worker spanning 4 nodes / 16 GPUs.
-release: kimi-k3-aggregated-tp8-ep8
+release: kimi-k3-aggregated-tp16-ep16
 topology: aggregated
 accelerator: gb200
 
