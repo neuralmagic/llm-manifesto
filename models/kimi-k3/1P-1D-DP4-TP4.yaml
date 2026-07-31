@@ -1,0 +1,91 @@
+# Kimi K3 disaggregated serving on GB200 NVL4, imported from the vLLM Recipes
+# GB200 pd_cluster profile, adapted to what actually runs on GB200: one
+# DP4/TP4/EP16 worker per role, 4 nodes each, 8 nodes / 32 GPUs total. The same
+# shape on both roles: TP stays inside a node, DP spans the four nodes, and EP
+# spans all 16 ranks. Every dimension divides evenly (4096/4, 896/16).
+# llm-d provides external load balancing across the decode DP ranks.
+#
+# Weight budget (1453.7 GiB MXFP4 checkpoint, 184.31 GiB usable per GB200 GPU):
+#   Both roles use moe_backend: auto. The recipe's deep_gemm_mega_moe cannot be
+#   used here: Kimi-K3 requests the `situ` activation, and public DeepGEMM 2.6.1
+#   asserts `Only swiglu activation is supported`. The environment's original
+#   deep_gemm 2.5.0+4bd6638 was a fork that passed activation through, and that
+#   commit is not in the public repository.
+#   DP4/TP4/EP16 -> dense/4 + experts/16, measured 137.5 GiB per GPU.
+#   16 GPUs per role is the floor: the expert shard alone is 1357/N GiB, so at
+#   8 GPUs (169.6 GiB) nothing fits regardless of the TP/DP split. The recipe's
+#   TP12 is unusable for a second reason -- the MoonViT tower has width 4096 and
+#   4096 % 12 != 0, so ColumnParallelLinear asserts during load.
+#   decode: the recipe's TP1/DP16 replicates the ~97 GiB dense stack on every DP
+#   rank, needing ~181.5 GiB per GPU and leaving no room for KV. TP2/DP8 shards
+#   dense two ways for ~133 GiB per GPU, keeping EP16 and ~51 GiB for KV.
+release: kimi-k3-1p-1d-dp4tp4
+topology: pd
+accelerator: gb200
+
+model:
+  id: moonshotai/Kimi-K3
+  image: vllm/vllm-openai:kimi-k3
+
+roles:
+  - name: decode
+    lws: {size: 4, same_topology_key: nvidia.com/gpu.clique}
+    parallelism: {tp: 4, dp: 4, ep: true}
+    fabric_profile: standard
+    kv_transfer_config:
+      kv_connector: NixlConnector
+      kv_role: kv_both
+      kv_load_failure_policy: fail
+    profiling:
+      profiler: torch
+      ignore_frontend: true
+      torch_profiler_with_stack: false
+      delay_iterations: 200
+      max_iterations: 50
+    env:
+      VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION: "1"
+      VLLM_SSM_CONV_STATE_LAYOUT: DS
+      NCCL_CUMEM_ENABLE: "1"
+      NCCL_MNNVL_ENABLE: "1"
+      NCCL_NVLS_ENABLE: "0"
+    vllm:
+      load_format: fastsafetensors
+      trust_remote_code: true
+      gpu_memory_utilization: "0.95"
+      max_num_seqs: 32
+      max_num_batched_tokens: 32
+      moe_backend: auto
+      no_enable_prefix_caching: true
+      no_disable_hybrid_kv_cache_manager: true
+      compilation_config: {cudagraph_mode: FULL_DECODE_ONLY}
+      enable_auto_tool_choice: true
+      tool_call_parser: kimi_k3
+      reasoning_parser: kimi_k3
+
+  - name: prefill
+    lws: {size: 4, same_topology_key: nvidia.com/gpu.clique}
+    parallelism: {tp: 4, dp: 4, ep: true}
+    fabric_profile: standard
+    kv_transfer_config:
+      kv_connector: NixlConnector
+      kv_role: kv_both
+      kv_load_failure_policy: fail
+    env:
+      VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION: "1"
+      VLLM_SSM_CONV_STATE_LAYOUT: DS
+      UCX_NET_DEVICES: all
+      NCCL_CUMEM_ENABLE: "1"
+      NCCL_MNNVL_ENABLE: "1"
+      NCCL_NVLS_ENABLE: "0"
+    vllm:
+      load_format: fastsafetensors
+      trust_remote_code: true
+      gpu_memory_utilization: "0.95"
+      max_num_batched_tokens: 16384
+      moe_backend: auto
+      enforce_eager: true
+      no_disable_hybrid_kv_cache_manager: true
+      no_enable_flashinfer_autotune: true
+      enable_auto_tool_choice: true
+      tool_call_parser: kimi_k3
+      reasoning_parser: kimi_k3

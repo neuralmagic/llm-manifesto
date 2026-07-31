@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import copy
+
 from .common import env_list, field_ref_env, secret_env
 from .sidecars import sidecars
 from ..cluster import Cluster
-from ..features import WorkloadKind
+from ..features import Feature, WorkloadKind
 from ..instance import Instance
 from ..launch import build_launch_script
 from ..parallelism import parallel_layout
 from ..resolve import resolve_role
 from ..spec import DeploymentSpec, RoleSpec
+
+# Endpoint-picker hint listing which InferencePool target ports a pod really serves.
+ACTIVE_PORTS_ANNOTATION = "inference.networking.k8s.io/active-ports"
+
+# LWS stamps this on the leader and every worker of a group; the value is a hash
+# of the leader's namespaced name, so it is unique per replica cluster-wide.
+LWS_GROUP_KEY_LABEL = "leaderworkerset.sigs.k8s.io/group-key"
 
 
 def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, role: RoleSpec) -> dict:
@@ -91,6 +100,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
                 role,
                 resolved.ports,
                 log_dir=resolved.log_dir,
+                trace_dir=resolved.trace_dir,
                 dev_source=resolved.dev_source,
                 persistent_cache=resolved.persistent_cache,
                 vllm_args=resolved.vllm_args,
@@ -191,8 +201,16 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
         "llm-d.ai/deployment": spec.topology.value,
     }
     pod_metadata = {"labels": pod_labels}
-    if cluster.pod_defaults.annotations:
-        pod_metadata["annotations"] = cluster.pod_defaults.annotations
+    annotations = dict(cluster.pod_defaults.annotations)
+    if Feature.LLM_D in resolved.features.enabled:
+        # A shared PD InferencePool advertises the union of both roles' ports.
+        # Without this, the endpoint picker assumes every target port is live on
+        # every pod and routes to ports a role with fewer ranks never opens.
+        annotations[ACTIVE_PORTS_ANNOTATION] = ",".join(
+            str(port) for port in resolved.ports.public
+        )
+    if annotations:
+        pod_metadata["annotations"] = annotations
 
     pod_spec = {"volumes": volumes, "containers": [vllm_container, *containers]}
     if cluster.openshift.scc:
@@ -201,8 +219,55 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
         pod_spec["terminationGracePeriodSeconds"] = (
             cluster.pod_defaults.termination_grace_period_seconds
         )
-    if cluster.pod_defaults.affinity:
-        pod_spec["affinity"] = cluster.pod_defaults.affinity
+    affinity = copy.deepcopy(cluster.pod_defaults.affinity)
+    if role.lws.same_topology_key:
+        required = affinity.setdefault("podAffinity", {}).setdefault(
+            "requiredDuringSchedulingIgnoredDuringExecution", []
+        )
+        # Scoped to the role, not the instance: a role's own collectives share
+        # an NVLink domain, but PD roles only exchange KV over RDMA, so forcing
+        # both into one domain would reject placements that work fine.
+        #
+        # matchLabelKeys narrows the term to the pod's own LWS group, which is
+        # what makes this correct at replicas > 1. The scheduler reads each
+        # listed key off the incoming pod and ANDs key=value into the selector
+        # above, so a decode pod in group abc123 effectively requires
+        # {instance, role=decode, group-key=abc123}. We cannot put group-key in
+        # matchLabels ourselves: one pod template is shared by every replica and
+        # LWS mints the value per group at admission, so there is nothing to
+        # hardcode. Without it the selector matches *any* replica of the role,
+        # which reads as "join a domain that already holds one of my role's
+        # pods" -- replica 0 seeds a domain and every later replica is then
+        # required to pile into that same one, going Pending once it fills
+        # rather than starting a second domain. With it, each group's leader
+        # finds no pod carrying its own group-key, hits the scheduler's
+        # empty-selector case (a required term with zero matches cluster-wide is
+        # satisfied), and is free to seed whichever domain fits; its workers
+        # then must follow it. Net: each replica stays domain-whole and replicas
+        # pack independently. group-key is globally unique, so the instance and
+        # role labels are strictly redundant once this is set -- they are kept
+        # because they cost nothing and state the intent.
+        #
+        # Requires the podAffinity matchLabelKeys beta (Kubernetes 1.31+,
+        # OpenShift 4.18+). Older API servers prune the field silently and fall
+        # back to the single-domain behavior described above -- no error, so
+        # check the server version before relying on this on a new cluster.
+        #
+        # This is placement, not gang scheduling: a leader picks its domain by
+        # where it alone fits, not where all lws.size pods fit. If domains start
+        # running near-full, reach for Kueue topology-aware scheduling rather
+        # than more affinity terms.
+        required.append(
+            {
+                "labelSelector": {
+                    "matchLabels": instance.pod_selector(role.name),
+                },
+                "matchLabelKeys": [LWS_GROUP_KEY_LABEL],
+                "topologyKey": role.lws.same_topology_key,
+            }
+        )
+    if affinity:
+        pod_spec["affinity"] = affinity
     if cluster.pod_defaults.tolerations:
         pod_spec["tolerations"] = cluster.pod_defaults.tolerations
     if cluster.pod_defaults.dns_policy:

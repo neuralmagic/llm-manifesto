@@ -7,7 +7,7 @@ import warnings
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -43,6 +43,71 @@ class LwsSpec(BaseModel):
 
     size: int = Field(1, ge=1)
     replicas: int = Field(1, ge=1)
+    same_topology_key: str | None = None
+
+
+class ProfilingSpec(BaseModel):
+    """Role-level profiler settings mapped onto vLLM's --profiler-config.
+
+    Field names mirror vLLM's ProfilerConfig so the mapping stays obvious.
+    The trace directory is supplied by the renderer unless overridden here,
+    which keeps user- and cluster-specific paths out of model specs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    profiler: Literal["torch", "cuda"] | None = None
+    trace_dir: str | None = None
+    ignore_frontend: bool | None = None
+    torch_profiler_with_stack: bool | None = None
+    torch_profiler_record_shapes: bool | None = None
+    torch_profiler_with_memory: bool | None = None
+    torch_profiler_with_flops: bool | None = None
+    capture_torch_profiler: bool | None = None
+    detailed_trace_annotation: bool | None = None
+    delay_iterations: int | None = Field(None, ge=0)
+    max_iterations: int | None = Field(None, ge=0)
+    warmup_iterations: int | None = Field(None, ge=0)
+    active_iterations: int | None = Field(None, ge=1)
+    wait_iterations: int | None = Field(None, ge=0)
+
+    @property
+    def enabled(self) -> bool:
+        return self.profiler is not None
+
+    def profiler_config(self, trace_dir: str | None) -> dict[str, Any]:
+        """Build the --profiler-config payload, omitting unset fields."""
+        if not self.enabled:
+            return {}
+        config: dict[str, Any] = {"profiler": self.profiler}
+        if self.profiler == "torch":
+            resolved_dir = self.trace_dir or trace_dir
+            if not resolved_dir:
+                raise ValueError(
+                    "torch profiling requires a log filesystem or an explicit "
+                    "profiling.trace_dir"
+                )
+            config["torch_profiler_dir"] = resolved_dir
+        elif self.trace_dir:
+            raise ValueError("profiling.trace_dir only applies to the torch profiler")
+        for name in (
+            "ignore_frontend",
+            "torch_profiler_with_stack",
+            "torch_profiler_record_shapes",
+            "torch_profiler_with_memory",
+            "torch_profiler_with_flops",
+            "capture_torch_profiler",
+            "detailed_trace_annotation",
+            "delay_iterations",
+            "max_iterations",
+            "warmup_iterations",
+            "active_iterations",
+            "wait_iterations",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                config[name] = value
+        return config
 
 
 class ParallelismSpec(BaseModel):
@@ -97,6 +162,7 @@ class RoleSpec(BaseModel):
     workload_name: str | None = None
     lws: LwsSpec = Field(default_factory=LwsSpec)
     parallelism: ParallelismSpec = Field(default_factory=ParallelismSpec)
+    profiling: ProfilingSpec = Field(default_factory=ProfilingSpec)
     serving_port_base: int = 8000
     backend_port_base: int | None = None
     routing_proxy: bool = False

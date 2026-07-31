@@ -1,0 +1,90 @@
+# Kimi K3 pruned75 disaggregated serving on GB200 NVL4: one DP2/TP4/EP8 prefill
+# worker plus one DP2/TP4/EP8 decode worker, 2 nodes per role, 4 nodes /
+# 16 GPUs total. Same shape on both roles: TP stays inside a node, DP spans the
+# two nodes, EP spans all 8 ranks.
+#
+# mgoin/Kimi-K3-pruned75 keeps Kimi K3's 93 layers and 7168 hidden size but
+# prunes the router from 896 experts to 224, so the checkpoint is 442.5 GiB
+# instead of 1453.7 GiB.
+#
+# Weight budget (184.31 GiB usable per GB200 GPU):
+#   dense/4 + experts/8 = ~24 + ~43 = ~67 GiB per GPU, leaving ample KV room.
+#   Divisibility: MoonViT tower 4096/4 = 1024, and 224 experts / 8 EP = 28.
+#
+# Decode batch limits are 4x the recipe's 32. Measured KV per DP rank is
+# 2,989,817 tokens (77.38 GiB), so at the 9k-token benchmark shape one rank
+# holds ~332 sequences; 128 uses ~38% of KV. max_num_batched_tokens must move
+# with max_num_seqs: each running decode sequence emits one token per step, so
+# leaving it at 32 would cap the running batch at 32 no matter what.
+release: kimi-k3-pruned75-1p-1d-dp2tp4
+topology: pd
+accelerator: gb200
+
+model:
+  id: mgoin/Kimi-K3-pruned75
+  label: Kimi-K3-pruned75
+  image: vllm/vllm-openai:kimi-k3
+
+roles:
+  - name: decode
+    lws: {size: 2, same_topology_key: nvidia.com/gpu.clique}
+    parallelism: {tp: 4, dp: 2, ep: true}
+    fabric_profile: standard
+    kv_transfer_config:
+      kv_connector: NixlConnector
+      kv_role: kv_both
+      kv_load_failure_policy: fail
+    profiling:
+      profiler: torch
+      ignore_frontend: true
+      torch_profiler_with_stack: false
+      delay_iterations: 200
+      max_iterations: 5
+    env:
+      VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION: "1"
+      VLLM_SSM_CONV_STATE_LAYOUT: DS
+      UCX_TLS: rc,cuda_copy
+      NCCL_CUMEM_ENABLE: "1"
+      NCCL_MNNVL_ENABLE: "1"
+      NCCL_NVLS_ENABLE: "0"
+    vllm:
+      load_format: fastsafetensors
+      trust_remote_code: true
+      gpu_memory_utilization: "0.95"
+      max_num_seqs: 128
+      max_num_batched_tokens: 128
+      moe_backend: deep_gemm_mega_moe
+      no_enable_prefix_caching: true
+      no_disable_hybrid_kv_cache_manager: true
+      compilation_config: {cudagraph_mode: FULL_DECODE_ONLY}
+      enable_auto_tool_choice: true
+      tool_call_parser: kimi_k3
+      reasoning_parser: kimi_k3
+
+  - name: prefill
+    lws: {size: 2, same_topology_key: nvidia.com/gpu.clique}
+    parallelism: {tp: 4, dp: 2, ep: true}
+    fabric_profile: standard
+    kv_transfer_config:
+      kv_connector: NixlConnector
+      kv_role: kv_both
+      kv_load_failure_policy: fail
+    env:
+      VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION: "1"
+      VLLM_SSM_CONV_STATE_LAYOUT: DS
+      UCX_TLS: rc,cuda_copy
+      NCCL_CUMEM_ENABLE: "1"
+      NCCL_MNNVL_ENABLE: "1"
+      NCCL_NVLS_ENABLE: "0"
+    vllm:
+      load_format: fastsafetensors
+      trust_remote_code: true
+      gpu_memory_utilization: "0.95"
+      max_num_batched_tokens: 16384
+      moe_backend: auto
+      enforce_eager: true
+      no_disable_hybrid_kv_cache_manager: true
+      no_enable_flashinfer_autotune: true
+      enable_auto_tool_choice: true
+      tool_call_parser: kimi_k3
+      reasoning_parser: kimi_k3

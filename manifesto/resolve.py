@@ -23,6 +23,7 @@ DEFAULT_VLLM_ARGS: dict[str, Any] = {
 class ResolvedRole:
     ports: RolePorts
     log_dir: str | None
+    trace_dir: str | None
     dev_source: str | None
     persistent_cache: bool
     fabric_profile: str
@@ -46,6 +47,22 @@ def resolve_role(spec: DeploymentSpec, instance: Instance, cluster: Cluster, rol
     context |= computed_env
     computed_vllm_args = render_mapping(role.computed.get("vllm", {}), context)
     vllm_args = DEFAULT_VLLM_ARGS | role.vllm_args | computed_vllm_args
+
+    log_dir = (
+        f"{cluster.log_root(user=instance.user_slug, release=instance.release_slug)}/{role.name}"
+        if cluster.has_log_filesystem
+        else None
+    )
+    trace_dir = None
+    if role.profiling.enabled:
+        if "profiler_config" in vllm_args:
+            raise ValueError(
+                f"{role.name}: set profiling: instead of a profiler_config vLLM arg"
+            )
+        default_trace_dir = f"{log_dir}/traces" if log_dir else None
+        profiler_config = role.profiling.profiler_config(default_trace_dir)
+        trace_dir = profiler_config.get("torch_profiler_dir")
+        vllm_args = vllm_args | {"profiler_config": profiler_config}
 
     fabric_profile = role.fabric_profile or cluster.fabric_profile_for(
         topology=spec.topology.value,
@@ -107,11 +124,8 @@ def resolve_role(spec: DeploymentSpec, instance: Instance, cluster: Cluster, rol
 
     return ResolvedRole(
         ports=ports,
-        log_dir=(
-            f"{cluster.log_root(user=instance.user_slug, release=instance.release_slug)}/{role.name}"
-            if cluster.has_log_filesystem
-            else None
-        ),
+        log_dir=log_dir,
+        trace_dir=trace_dir,
         dev_source=dev_source,
         persistent_cache=cache_prefix is not None,
         fabric_profile=fabric_profile,
