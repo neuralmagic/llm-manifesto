@@ -54,6 +54,7 @@ def build_launch_script(
     ports: RolePorts,
     *,
     log_dir: str | None,
+    trace_dir: str | None = None,
     dev_source: str | None,
     persistent_cache: bool = False,
     vllm_args: dict[str, Any] | None = None,
@@ -72,6 +73,11 @@ def build_launch_script(
             'LOG_FILE="$LOG_DIR/${HOSTNAME}_$(date +%Y%m%d-%H%M%S).log"',
             'exec > >(tee -a "$LOG_FILE") 2>&1',
             'echo "=== Pod $HOSTNAME started at $(date -Iseconds) ==="',
+            "",
+        ]
+    if trace_dir:
+        lines += [
+            f"mkdir -p {shlex.quote(trace_dir)}",
             "",
         ]
     if cleanup_cache:

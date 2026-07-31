@@ -1,5 +1,5 @@
-# Kimi K3 TEP on GB200 NVL72: TP8/EP8,
-# 1 aggregated worker spanning 2 nodes / 8 GPUs.
+# Kimi K3 TEP on GB200 NVL72: TP16/EP16,
+# 1 aggregated worker spanning 4 nodes / 16 GPUs.
 release: kimi-k3-aggregated-tp8-ep8
 topology: aggregated
 accelerator: gb200
@@ -18,14 +18,13 @@ vars:
 roles:
   - name: decode
     workload_name: vllm-kimi-k3
-    lws: {size: 2, replicas: 1}
-    parallelism: {tp: 8, dp: false, ep: true}
+    lws: {size: 4, replicas: 1, same_topology_key: nvidia.com/gpu.clique}
+    parallelism: {tp: 16, dp: false, ep: true}
     env:
       VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION: "1"
       VLLM_ALLREDUCE_USE_FLASHINFER: "1"
       VLLM_ENGINE_READY_TIMEOUT_S: "3600"
       VLLM_USE_V2_MODEL_RUNNER: "1"
-      VLLM_USE_RUST_FRONTEND: "1"
       VLLM_SSM_CONV_STATE_LAYOUT: DS
       NCCL_CUMEM_ENABLE: "1"
       NCCL_MNNVL_ENABLE: "1"
@@ -41,7 +40,6 @@ roles:
       max_num_seqs: 32
       max_num_batched_tokens: 32
       moe_backend: deep_gemm_mega_moe
-      all2all_backend: deepep_v2
       kv_cache_dtype: fp8
       block_size: 128
       attention_config: {use_prefill_query_quantization: true}
