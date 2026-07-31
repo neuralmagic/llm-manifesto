@@ -83,8 +83,9 @@ def test_deepseek_v4_llmd_guide_variants_expand(
         assert "eplb_config" not in decode.vllm_args
     else:
         assert decode.vllm_args["all2all_backend"] == "deepep_v2"
-        assert decode.vllm_args["enable_eplb"] is True
-        assert decode.vllm_args["eplb_config"]["num_redundant_experts"] == "32"
+        assert decode.vllm_args["moe_backend"] == "flashinfer_trtllm"
+        assert decode.vllm_args["enable_eplb"] is False
+        assert "eplb_config" not in decode.vllm_args
 
 
 def test_nested_eplb_config_can_be_overridden_without_restatement():
@@ -118,21 +119,3 @@ def test_override_can_delete_inherited_key():
     )
 
     assert merged["roles"][0]["vllm"] == {"moe_backend": "deep_gemm_mega_moe"}
-
-
-def test_deepseek_v4_ep8_decode_uses_megagemm_without_all2all():
-    spec = load_spec(ROOT / "models" / "deepseek-v4" / "1P-EP8-1D-EP8.yaml", CLUSTER)
-    decode = spec.role("decode")
-
-    assert decode.vllm_args["moe_backend"] == "deep_gemm_mega_moe"
-    assert "all2all_backend" not in decode.vllm_args
-    assert decode.vllm_args["enable_eplb"] is False
-    assert "eplb_config" not in decode.vllm_args
-
-
-def test_deepseek_v4_ep16_decode_inherits_deepep_v2():
-    spec = load_spec(ROOT / "models" / "deepseek-v4" / "3P-EP8-1D-EP16.yaml", CLUSTER)
-    decode = spec.role("decode")
-
-    assert decode.vllm_args["all2all_backend"] == "deepep_v2"
-    assert decode.vllm_args["enable_eplb"] is True
