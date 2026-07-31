@@ -69,12 +69,10 @@ def _mock_discovery(monkeypatch, responses):
         assert resource_types, "discovery must request at least one resource type"
         return list(next(rounds))
 
-    def fake_capture(cmd, **_):
-        assert "api-resources" in cmd, cmd
-        return "deployments.apps\npods\nservices\n"
-
     monkeypatch.setattr(workflow, "list_objects", fake_list_objects)
-    monkeypatch.setattr(workflow, "capture", fake_capture)
+    monkeypatch.setattr(
+        workflow, "capture", lambda cmd, **_: pytest.fail(f"unexpected cluster read: {cmd}")
+    )
 
 
 def test_user_config_catalog_resolves_models_and_clusters(monkeypatch, tmp_path):
@@ -1258,8 +1256,6 @@ def test_completion_live_instances_honors_inline_namespace(monkeypatch, capsys):
 
     def fake_capture(cmd, **_):
         commands.append(cmd)
-        if "api-resources" in cmd:
-            return "deployments.apps\npods\n"
         return json.dumps({"items": objects if "deployments.apps" in cmd else []})
 
     monkeypatch.setattr(workflow, "capture", fake_capture)
@@ -1276,8 +1272,6 @@ def test_completion_gives_up_quickly_on_a_slow_cluster(monkeypatch, capsys):
         if "config" in cmd:
             return "workload-ns"
         limits.append((kwargs.get("timeout"), kwargs.get("retries", 0)))
-        if "api-resources" in cmd:
-            return "deployments.apps\npods\n"
         raise workflow.WorkflowError("timed out")
 
     monkeypatch.setattr(workflow, "capture", fake_capture)
@@ -1290,15 +1284,14 @@ def test_completion_gives_up_quickly_on_a_slow_cluster(monkeypatch, capsys):
     assert all(retries == 0 for _, retries in limits)
 
 
-def test_discovery_issues_one_request_per_resource_type(monkeypatch):
+def test_discovery_lists_every_managed_type_without_a_preflight(monkeypatch):
     requested = []
-    # Only satisfiable if all three lists are in flight at once; a sequential
+    # Only satisfiable if every list is in flight at once; a sequential
     # implementation deadlocks here and trips the timeout.
-    overlapping = threading.Barrier(3, timeout=10)
+    overlapping = threading.Barrier(len(workflow.DISCOVERY_RESOURCE_TYPES), timeout=10)
 
     def fake_capture(cmd, **_):
-        if "api-resources" in cmd:
-            return "deployments.apps\npods\nservices\n"
+        assert "api-resources" not in cmd, "discovery must not cost a preflight round trip"
         resource_type = cmd[cmd.index("get") + 1]
         requested.append(resource_type)
         overlapping.wait()
@@ -1327,7 +1320,8 @@ def test_discovery_issues_one_request_per_resource_type(monkeypatch):
 
     resources = workflow.discover_live_resources(config)
 
-    assert sorted(requested) == ["deployments.apps", "pods", "services"]
+    assert sorted(requested) == sorted(workflow.DISCOVERY_RESOURCE_TYPES)
+    assert set(MANAGED_RESOURCE_TYPES.values()) <= set(requested)
     assert [(item.api_version, item.kind, item.name) for item in resources] == [
         ("v1", "Pod", "alice-model-0")
     ]
@@ -1345,30 +1339,6 @@ def test_typed_list_items_recover_their_kind():
 def test_a_non_list_payload_is_an_error_not_an_empty_result(payload):
     with pytest.raises(workflow.WorkflowError, match="expected a list"):
         workflow._objects_from_list(payload)
-
-
-def test_partial_api_resource_output_does_not_shrink_the_managed_set(monkeypatch, capsys):
-    """kubectl prints what it reached and exits nonzero when an API group fails.
-
-    Trusting that truncated list would drop types such as the LeaderWorkerSet from
-    teardown, leaving a model server running while `stop` reported success.
-    """
-
-
-    def fake_capture(cmd, **kwargs):
-        assert "api-resources" in cmd
-        raise workflow.WorkflowError(
-            "error: unable to retrieve the complete list of server APIs: "
-            "inference.networking.k8s.io/v1: the server is currently unable to handle the request"
-        )
-
-    monkeypatch.setattr(workflow, "capture", fake_capture)
-
-    resource_types = workflow.discovery_resource_types()
-
-    assert set(MANAGED_RESOURCE_TYPES.values()) <= set(resource_types)
-    assert "leaderworkersets.leaderworkerset.x-k8s.io" in resource_types
-    assert "could not enumerate cluster API resources" in capsys.readouterr().err
 
 
 def test_servers_reports_an_empty_namespace_without_crashing(monkeypatch, capsys):
@@ -1397,44 +1367,9 @@ def test_kubectl_limits_rejects_unknown_knobs_and_restores_state(monkeypatch):
     assert workflow.kubectl_retries() == workflow.DEFAULT_KUBECTL_RETRIES
 
 
-def test_api_resource_discovery_is_fetched_once_per_process(monkeypatch):
-    discoveries = []
-
-    def fake_capture(cmd, **_):
-        if "api-resources" in cmd:
-            discoveries.append(cmd)
-            return "pods\n"
-        return json.dumps({"apiVersion": "v1", "kind": "PodList", "items": []})
-
-    monkeypatch.setattr(workflow, "capture", fake_capture)
-    config = workflow.RuntimeConfig("tester", "workload-ns", None, Path("/tmp/rendered.yaml"))
-
-    workflow.discover_live_resources(config)
-    workflow.discover_live_resources(config)
-
-    assert len(discoveries) == 1
-
-
-def test_unusable_api_resource_listing_falls_back_to_the_managed_set(monkeypatch, capsys):
-
-    def fake_capture(cmd, **_):
-        if "api-resources" in cmd:
-            return ""
-        return json.dumps({"apiVersion": "v1", "kind": "List", "items": []})
-
-    monkeypatch.setattr(workflow, "capture", fake_capture)
-    config = workflow.RuntimeConfig("tester", "workload-ns", None, Path("/tmp/rendered.yaml"))
-
-    assert workflow.discover_live_resources(config) == []
-    assert set(MANAGED_RESOURCE_TYPES.values()) <= set(workflow.discovery_resource_types())
-    assert "could not enumerate cluster API resources" in capsys.readouterr().err
-
-
 def test_a_failed_list_is_not_mistaken_for_an_empty_namespace(monkeypatch, capsys):
 
     def fake_capture(cmd, **_):
-        if "api-resources" in cmd:
-            return "deployments.apps\npods\n"
         if "deployments.apps" in cmd:
             raise workflow.WorkflowError('Error from server (Forbidden): deployments.apps is forbidden')
         return json.dumps({"apiVersion": "v1", "kind": "PodList", "items": []})
@@ -1449,8 +1384,6 @@ def test_a_failed_list_is_not_mistaken_for_an_empty_namespace(monkeypatch, capsy
 def test_unserved_resource_types_do_not_fail_discovery(monkeypatch):
 
     def fake_capture(cmd, **kwargs):
-        if "api-resources" in cmd:
-            return "pods\n"
         if "leaderworkersets.leaderworkerset.x-k8s.io" in cmd:
             assert "the server doesn't have a resource type" in kwargs["tolerate"]
             return ""
@@ -1484,16 +1417,12 @@ def test_teardown_verifies_against_the_full_managed_set(monkeypatch, capsys):
         requested.append(tuple(resource_types))
         return list(next(rounds))
 
-    def fake_capture(cmd, **_):
-        return "deployments.apps\npods\nservices\n"
-
     monkeypatch.setattr(workflow, "list_objects", fake_list_objects)
-    monkeypatch.setattr(workflow, "capture", fake_capture)
     monkeypatch.setattr(workflow, "run", lambda cmd, **_: 0)
 
     assert main(["stop", "--namespace", "workload-ns", "--instance", "alice-qwen"]) == 0
     assert "Stopped alice-qwen." in capsys.readouterr().out
-    full_set = ("deployments.apps", "services", "pods")
+    full_set = workflow.DISCOVERY_RESOURCE_TYPES
     assert requested == [full_set, ("pods",), full_set]
 
 

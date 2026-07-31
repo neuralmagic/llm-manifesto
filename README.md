@@ -574,7 +574,9 @@ and `--output json` includes the exact resources associated with each instance.
 `manifesto servers` and `manifesto stop` find live objects by listing every
 Manifesto-managed resource type. Those lists run concurrently, one request per
 type, so discovery costs roughly one API round trip of wall-clock time instead of
-one per type. API resource discovery is fetched once per command.
+one per type. There is no `kubectl api-resources` preflight: a type the cluster
+does not serve simply lists as zero objects, and pruning the set in advance would
+not save any wall clock once the lists run in parallel.
 
 Discovery reads are bounded and retried on transient faults. Tune them when an
 API server is unusually slow or flaky:

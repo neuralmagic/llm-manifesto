@@ -46,7 +46,6 @@ from .workflow import (
     load_dotenv,
     load_runtime_cluster,
     ready,
-    reset_caches,
     render_bootstrap_manifest,
     render_manifest,
     render_to_file,
@@ -618,7 +617,6 @@ def _normalize_deploy_argv(argv: list[str]) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    reset_caches()
     parser = _build_parser()
     if argv and argv[0] == "__complete":
         for candidate in _completion_candidates(parser, argv[1:]):

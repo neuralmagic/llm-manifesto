@@ -51,6 +51,12 @@ MANAGED_RESOURCE_TYPES = {
 POD_RESOURCE_TYPE = "pods"
 MANIFESTO_SELECTOR = "app.kubernetes.io/name=manifesto"
 
+# Everything discovery lists. Asking for a type this cluster does not serve is
+# harmless -- list_objects tolerates that one error and reads it as zero objects --
+# so there is nothing to gain from a `kubectl api-resources` round trip first:
+# the lists run concurrently, so pruning the set would not save any wall clock.
+DISCOVERY_RESOURCE_TYPES = (*sorted(set(MANAGED_RESOURCE_TYPES.values())), POD_RESOURCE_TYPE)
+
 # Discovery talks to clusters whose API round trips can be seconds long, so every
 # read is bounded, retried on transient faults, and fanned out across resource
 # types instead of walking them one at a time inside a single kubectl process.
@@ -83,7 +89,6 @@ TRACE_OFF_VALUES = frozenset({"", "0", "false", "no", "off"})
 
 _UNSET = object()
 _kubectl_limits: dict[str, float | int | None] = {}
-_discovery_types: tuple[str, ...] | None = None
 
 
 class WorkflowError(RuntimeError):
@@ -690,58 +695,6 @@ def dev_stop(args, *, config: RuntimeConfig | None = None) -> int:
     return run([*config.kubectl(), "delete", f"pod/{pod_name}", "--ignore-not-found=true"])
 
 
-def discovery_resource_types() -> tuple[str, ...]:
-    """Return the resource types worth listing for Manifesto-managed objects.
-
-    ``kubectl api-resources`` is a full discovery round trip, so the answer is
-    memoized for the life of the process. It is also only usable when it exits
-    cleanly: when any API group fails to answer, kubectl prints the groups it did
-    reach and exits nonzero, and trusting that truncated list would silently drop
-    managed types from teardown. Anything short of a clean listing therefore falls
-    back to the complete managed set, which costs nothing extra in wall clock
-    because the lists run concurrently, and lets unserved types drop out per query.
-    """
-
-    global _discovery_types
-    if _discovery_types is not None:
-        return _discovery_types
-
-    timeout = kubectl_timeout()
-    try:
-        listing = capture(
-            [
-                "kubectl",
-                "api-resources",
-                "--namespaced=true",
-                "--verbs=list,delete",
-                "-o",
-                "name",
-                *_request_timeout_flag(timeout),
-            ],
-            timeout=timeout,
-            # Retrying buys nothing: the fallback below is already free.
-            retries=0,
-        )
-    except WorkflowError:
-        listing = ""
-    available = {line.strip() for line in listing.splitlines() if line.strip()}
-
-    known = set(MANAGED_RESOURCE_TYPES.values())
-    # Every cluster serves pods, so their absence means the listing is unusable
-    # rather than that the cluster genuinely lacks Manifesto-managed types.
-    if POD_RESOURCE_TYPE in available:
-        resource_types = [*sorted(known & available), POD_RESOURCE_TYPE]
-    else:
-        print(
-            "Warning: could not enumerate cluster API resources; "
-            "querying every Manifesto-managed type instead.",
-            file=sys.stderr,
-        )
-        resource_types = [*sorted(known), POD_RESOURCE_TYPE]
-    _discovery_types = tuple(resource_types)
-    return _discovery_types
-
-
 def _objects_from_list(raw: str) -> list[dict]:
     """Parse a kubectl list into its items.
 
@@ -829,7 +782,7 @@ def discover_live_resources(
     resource_types: tuple[str, ...] | None = None,
 ) -> list[LiveResource]:
     if resource_types is None:
-        resource_types = discovery_resource_types()
+        resource_types = DISCOVERY_RESOURCE_TYPES
     selector = MANIFESTO_SELECTOR
     if instance_id:
         selector += f",app.kubernetes.io/instance={instance_id}"
@@ -1171,13 +1124,6 @@ def kubectl_limits(*, timeout: float | None | object = _UNSET, retries: int | ob
     finally:
         _kubectl_limits.clear()
         _kubectl_limits.update(previous)
-
-
-def reset_caches() -> None:
-    """Drop memoized cluster discovery. Exposed for the CLI entrypoint and tests."""
-
-    global _discovery_types
-    _discovery_types = None
 
 
 def _request_timeout_flag(timeout: float | None) -> list[str]:
