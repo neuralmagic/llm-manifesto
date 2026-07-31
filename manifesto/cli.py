@@ -24,6 +24,7 @@ from .render import render
 from .resolve import resolve_role
 from .spec import load_spec
 from .workflow import (
+    COMPLETION_KUBECTL_TIMEOUT,
     RuntimeConfig,
     WorkflowError,
     apply_runtime_overrides,
@@ -40,6 +41,7 @@ from .workflow import (
     dev_start,
     dev_stop,
     diff_file,
+    kubectl_limits,
     load_cluster_with_overrides,
     load_dotenv,
     load_runtime_cluster,
@@ -749,8 +751,11 @@ def _completion_live_instances(tokens: list[str]) -> list[str]:
     output = io.StringIO()
     args = argparse.Namespace(namespace=namespace, instance=None, output="name")
     try:
+        # Tab completion must never stall the shell: a slow cluster yields no
+        # candidates rather than a multi-second pause.
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
-            servers(args)
+            with kubectl_limits(timeout=COMPLETION_KUBECTL_TIMEOUT, retries=0):
+                servers(args)
     except (OSError, WorkflowError, ValueError):
         return []
     return output.getvalue().splitlines()

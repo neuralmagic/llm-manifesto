@@ -1,6 +1,7 @@
 """CLI regression tests for derived paths, overrides, and routing-only rendering."""
 
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -60,16 +61,18 @@ def _live_object(kind, name, instance, *, api_version="v1", labels=None, ready=F
 
 
 def _mock_discovery(monkeypatch, responses):
-    get_responses = iter(responses)
+    """Serve one canned discovery round per ``list_objects`` call."""
 
-    def fake_capture(cmd, **_):
-        if "api-resources" in cmd:
-            return "deployments.apps\npods\nservices\n"
-        if "get" in cmd:
-            return json.dumps({"items": next(get_responses)})
-        raise AssertionError(cmd)
+    rounds = iter(responses)
 
-    monkeypatch.setattr(workflow, "capture", fake_capture)
+    def fake_list_objects(config, resource_types, selector, **_):
+        assert resource_types, "discovery must request at least one resource type"
+        return list(next(rounds))
+
+    monkeypatch.setattr(workflow, "list_objects", fake_list_objects)
+    monkeypatch.setattr(
+        workflow, "capture", lambda cmd, **_: pytest.fail(f"unexpected cluster read: {cmd}")
+    )
 
 
 def test_user_config_catalog_resolves_models_and_clusters(monkeypatch, tmp_path):
@@ -1136,7 +1139,7 @@ def test_bare_stop_uses_numbered_picker_without_fzf(monkeypatch, capsys):
     assert "Stopped alice-qwen." in capsys.readouterr().out
 
 
-def test_picker_uses_fzf_with_resource_preview(monkeypatch):
+def test_picker_previews_prefetched_resources_without_more_cluster_reads(monkeypatch):
     record = workflow.ServerRecord(
         "alice-qwen",
         (workflow.LiveResource("apps/v1", "Deployment", "alice-model", {}),),
@@ -1147,16 +1150,19 @@ def test_picker_uses_fzf_with_resource_preview(monkeypatch):
         returncode = 0
         stdout = "alice-qwen\tReady\tqwen\tdecode\t1/1\t2h\n"
 
+    def fake_run(cmd, **kwargs):
+        preview = next(arg for arg in cmd if arg.startswith("--preview="))
+        directory = preview.removeprefix("--preview=cat ").removesuffix("/{1}").strip("'")
+        captured.update(cmd=cmd, kwargs=kwargs, preview=(Path(directory) / "alice-qwen").read_text())
+        return Result()
+
     monkeypatch.setattr(workflow.shutil, "which", lambda _: "/usr/bin/fzf")
-    monkeypatch.setattr(
-        workflow.subprocess,
-        "run",
-        lambda cmd, **kwargs: captured.update(cmd=cmd, kwargs=kwargs) or Result(),
-    )
+    monkeypatch.setattr(workflow, "capture", lambda cmd, **_: pytest.fail(f"unexpected read: {cmd}"))
+    monkeypatch.setattr(workflow.subprocess, "run", fake_run)
     config = workflow.RuntimeConfig("tester", "workload-ns", None, Path("/tmp/rendered.yaml"))
 
     assert workflow.pick_server([record], config) == record
-    assert any("servers --namespace workload-ns --instance" in arg for arg in captured["cmd"])
+    assert "Deployment           alice-model" in captured["preview"]
     assert captured["kwargs"]["input"].startswith("alice-qwen\t")
 
 
@@ -1250,15 +1256,245 @@ def test_completion_live_instances_honors_inline_namespace(monkeypatch, capsys):
 
     def fake_capture(cmd, **_):
         commands.append(cmd)
-        if "api-resources" in cmd:
-            return "deployments.apps\n"
-        return json.dumps({"items": objects})
+        return json.dumps({"items": objects if "deployments.apps" in cmd else []})
 
     monkeypatch.setattr(workflow, "capture", fake_capture)
 
     assert main(["__complete", "servers", "--namespace=inline-ns", "--instance", "alice"]) == 0
     assert capsys.readouterr().out.splitlines() == ["alice-qwen"]
     assert any(command[:3] == ["kubectl", "-n", "inline-ns"] for command in commands)
+
+
+def test_completion_gives_up_quickly_on_a_slow_cluster(monkeypatch, capsys):
+    limits = []
+
+    def fake_capture(cmd, **kwargs):
+        if "config" in cmd:
+            return "workload-ns"
+        limits.append((kwargs.get("timeout"), kwargs.get("retries", 0)))
+        raise workflow.WorkflowError("timed out")
+
+    monkeypatch.setattr(workflow, "capture", fake_capture)
+
+    assert main(["__complete", "servers", "--instance", ""]) == 0
+    assert capsys.readouterr().out == ""
+    # Both the discovery call and the per-type lists must inherit the short budget.
+    assert len(limits) > 1
+    assert all(timeout == workflow.COMPLETION_KUBECTL_TIMEOUT for timeout, _ in limits)
+    assert all(retries == 0 for _, retries in limits)
+
+
+def test_discovery_lists_every_managed_type_without_a_preflight(monkeypatch):
+    requested = []
+    # Only satisfiable if every list is in flight at once; a sequential
+    # implementation deadlocks here and trips the timeout.
+    overlapping = threading.Barrier(len(workflow.DISCOVERY_RESOURCE_TYPES), timeout=10)
+
+    def fake_capture(cmd, **_):
+        assert "api-resources" not in cmd, "discovery must not cost a preflight round trip"
+        resource_type = cmd[cmd.index("get") + 1]
+        requested.append(resource_type)
+        overlapping.wait()
+        if resource_type != "pods":
+            return json.dumps({"apiVersion": "v1", "kind": "List", "items": []})
+        # kubectl rewraps single-type output as a v1 List with per-item kinds.
+        return json.dumps(
+            {
+                "apiVersion": "v1",
+                "kind": "List",
+                "items": [
+                    {
+                        "apiVersion": "v1",
+                        "kind": "Pod",
+                        "metadata": {
+                            "name": "alice-model-0",
+                            "labels": {"app.kubernetes.io/instance": "alice-qwen"},
+                        },
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(workflow, "capture", fake_capture)
+    config = workflow.RuntimeConfig("tester", "workload-ns", None, Path("/tmp/rendered.yaml"))
+
+    resources = workflow.discover_live_resources(config)
+
+    assert sorted(requested) == sorted(workflow.DISCOVERY_RESOURCE_TYPES)
+    assert set(MANAGED_RESOURCE_TYPES.values()) <= set(requested)
+    assert [(item.api_version, item.kind, item.name) for item in resources] == [
+        ("v1", "Pod", "alice-model-0")
+    ]
+
+
+def test_typed_list_items_recover_their_kind():
+    objects = workflow._objects_from_list(
+        json.dumps({"apiVersion": "v1", "kind": "PodList", "items": [{"metadata": {"name": "p"}}]})
+    )
+
+    assert objects == [{"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "p"}}]
+
+
+@pytest.mark.parametrize("payload", ['{"kind": "Status", "status": "Failure"}', "[]", "null"])
+def test_a_non_list_payload_is_an_error_not_an_empty_result(payload):
+    with pytest.raises(workflow.WorkflowError, match="expected a list"):
+        workflow._objects_from_list(payload)
+
+
+def test_servers_reports_an_empty_namespace_without_crashing(monkeypatch, capsys):
+    _mock_discovery(monkeypatch, [[]])
+
+    assert main(["servers", "--namespace", "workload-ns"]) == 0
+    assert capsys.readouterr().out.splitlines() == ["INSTANCE  STATE  MODEL  ROLES  PODS  AGE"]
+
+
+def test_kubectl_limits_rejects_unknown_knobs_and_restores_state(monkeypatch):
+    monkeypatch.delenv("MANIFESTO_KUBECTL_TIMEOUT", raising=False)
+    monkeypatch.delenv("MANIFESTO_KUBECTL_RETRIES", raising=False)
+
+    with pytest.raises(TypeError):
+        with workflow.kubectl_limits(tmeout=1):
+            pass
+
+    with workflow.kubectl_limits(timeout=3.0, retries=0):
+        assert workflow.kubectl_timeout() == 3.0
+        assert workflow.kubectl_retries() == 0
+        with workflow.kubectl_limits(timeout=9.0):
+            assert workflow.kubectl_timeout() == 9.0
+            assert workflow.kubectl_retries() == 0
+        assert workflow.kubectl_timeout() == 3.0
+    assert workflow.kubectl_timeout() == workflow.DEFAULT_KUBECTL_TIMEOUT
+    assert workflow.kubectl_retries() == workflow.DEFAULT_KUBECTL_RETRIES
+
+
+def test_a_failed_list_is_not_mistaken_for_an_empty_namespace(monkeypatch, capsys):
+
+    def fake_capture(cmd, **_):
+        if "deployments.apps" in cmd:
+            raise workflow.WorkflowError('Error from server (Forbidden): deployments.apps is forbidden')
+        return json.dumps({"apiVersion": "v1", "kind": "PodList", "items": []})
+
+    monkeypatch.setattr(workflow, "capture", fake_capture)
+    monkeypatch.setenv("MANIFESTO_NAMESPACE", "workload-ns")
+
+    assert main(["stop", "--instance", "alice-qwen"]) == 1
+    assert "Forbidden" in capsys.readouterr().err
+
+
+def test_unserved_resource_types_do_not_fail_discovery(monkeypatch):
+
+    def fake_capture(cmd, **kwargs):
+        if "leaderworkersets.leaderworkerset.x-k8s.io" in cmd:
+            assert "the server doesn't have a resource type" in kwargs["tolerate"]
+            return ""
+        return json.dumps({"apiVersion": "v1", "kind": "PodList", "items": []})
+
+    monkeypatch.setattr(workflow, "capture", fake_capture)
+    config = workflow.RuntimeConfig("tester", "workload-ns", None, Path("/tmp/rendered.yaml"))
+
+    assert workflow.list_objects(
+        config,
+        ("leaderworkersets.leaderworkerset.x-k8s.io", "pods"),
+        workflow.MANIFESTO_SELECTOR,
+    ) == []
+
+
+def test_teardown_verifies_against_the_full_managed_set(monkeypatch, capsys):
+    """The orphan-pod round is pods-only, but the final word must not be narrowed.
+
+    Narrowing the last check to the types seen before the delete would let a type
+    missed by an incomplete first discovery go unreported as a teardown success.
+    """
+
+    objects = [
+        _live_object("Deployment", "alice-model", "alice-qwen", api_version="apps/v1"),
+        _live_object("Pod", "alice-model-0", "alice-qwen", ready=True),
+    ]
+    rounds = iter([objects, [], []])
+    requested = []
+
+    def fake_list_objects(config, resource_types, selector, **_):
+        requested.append(tuple(resource_types))
+        return list(next(rounds))
+
+    monkeypatch.setattr(workflow, "list_objects", fake_list_objects)
+    monkeypatch.setattr(workflow, "run", lambda cmd, **_: 0)
+
+    assert main(["stop", "--namespace", "workload-ns", "--instance", "alice-qwen"]) == 0
+    assert "Stopped alice-qwen." in capsys.readouterr().out
+    full_set = workflow.DISCOVERY_RESOURCE_TYPES
+    assert requested == [full_set, ("pods",), full_set]
+
+
+def test_capture_retries_transient_cluster_failures(monkeypatch):
+    attempts = []
+
+    class Result:
+        def __init__(self, returncode, stderr):
+            self.returncode = returncode
+            self.stdout = "ok"
+            self.stderr = stderr
+
+    def fake_run(cmd, **kwargs):
+        attempts.append(kwargs.get("timeout"))
+        if len(attempts) < 3:
+            return Result(1, "Unable to connect to the server: dial tcp: i/o timeout")
+        return Result(0, "")
+
+    monkeypatch.setattr(workflow.subprocess, "run", fake_run)
+    monkeypatch.setattr(workflow.time, "sleep", lambda _: None)
+
+    assert workflow.capture(["kubectl", "get", "pods"], timeout=30, retries=2) == "ok"
+    assert attempts == [30, 30, 30]
+
+
+def test_capture_does_not_retry_a_genuine_error(monkeypatch):
+    attempts = []
+
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = 'namespaces "missing" not found'
+
+    def fake_run(cmd, **_):
+        attempts.append(cmd)
+        return Result()
+
+    monkeypatch.setattr(workflow.subprocess, "run", fake_run)
+    monkeypatch.setattr(workflow.time, "sleep", lambda _: None)
+
+    with pytest.raises(workflow.WorkflowError, match="not found"):
+        workflow.capture(["kubectl", "get", "pods"], retries=3)
+    assert len(attempts) == 1
+
+
+def test_capture_surfaces_a_hung_cluster_read(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        raise workflow.subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+    monkeypatch.setattr(workflow.subprocess, "run", fake_run)
+    monkeypatch.setattr(workflow.time, "sleep", lambda _: None)
+
+    with pytest.raises(workflow.WorkflowError, match="MANIFESTO_KUBECTL_TIMEOUT"):
+        workflow.capture(["kubectl", "get", "pods"], timeout=5, retries=1)
+
+
+def test_kubectl_read_budget_is_configurable(monkeypatch):
+    monkeypatch.delenv("MANIFESTO_KUBECTL_TIMEOUT", raising=False)
+    monkeypatch.delenv("MANIFESTO_KUBECTL_RETRIES", raising=False)
+    assert workflow.kubectl_timeout() == workflow.DEFAULT_KUBECTL_TIMEOUT
+    assert workflow.kubectl_retries() == workflow.DEFAULT_KUBECTL_RETRIES
+
+    monkeypatch.setenv("MANIFESTO_KUBECTL_TIMEOUT", "600")
+    monkeypatch.setenv("MANIFESTO_KUBECTL_RETRIES", "5")
+    assert workflow.kubectl_timeout() == 600
+    assert workflow.kubectl_retries() == 5
+    # Slightly inside the process deadline, so kubectl reports its own diagnostic.
+    assert workflow._request_timeout_flag(600) == ["--request-timeout=540s"]
+
+    monkeypatch.setenv("MANIFESTO_KUBECTL_TIMEOUT", "0")
+    assert workflow.kubectl_timeout() is None
+    assert workflow._request_timeout_flag(None) == []
 
 
 def test_teardown_allowlist_covers_every_rendered_kind():
