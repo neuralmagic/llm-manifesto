@@ -605,7 +605,20 @@ fi
 
 def dev_shell(args) -> int:
     config = RuntimeConfig.from_args(args, require_cluster=False)
-    _, pod_name = _dev_identity(config)
+    instance, pod_name = _dev_identity(config)
+    source = None
+    try:
+        cluster = load_cluster_with_overrides(
+            config.cluster_path or resolve_cluster(), args
+        )
+        source = cluster.dev_source(user=instance.user_slug, release="")
+    except WorkflowError:
+        pass
+    if source:
+        return run([
+            *config.kubectl(), "exec", "-it", pod_name, "--",
+            "/bin/zsh", "-c", f"cd {shlex.quote(source)} 2>/dev/null; exec /bin/zsh",
+        ])
     return run([*config.kubectl(), "exec", "-it", pod_name, "--", "/bin/zsh"])
 
 
