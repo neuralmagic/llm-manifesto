@@ -56,6 +56,8 @@ from .workflow import (
     servers,
     stop,
     VLLM_BUILD_JOBS,
+    FLASHINFER_VERSION,
+    NCCL_VERSION,
     VLLM_DEV_BRANCH,
     VLLM_DEV_REMOTE,
 )
@@ -443,11 +445,21 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_dev_args(dev_shell_parser)
     dev_shell_parser.set_defaults(func=dev_shell)
 
-    dev_build_parser = dev_sub.add_parser("build", help="build vLLM from source in the development pod")
+    dev_build_parser = dev_sub.add_parser("build", help="install vLLM in the development pod")
     _add_dev_args(dev_build_parser)
     dev_build_parser.add_argument("--remote", default=VLLM_DEV_REMOTE)
     dev_build_parser.add_argument("--branch", default=VLLM_DEV_BRANCH)
     dev_build_parser.add_argument("--jobs", type=int, default=VLLM_BUILD_JOBS)
+    dev_build_parser.add_argument(
+        "--source-build",
+        action="store_true",
+        help=(
+            "compile the CUDA extensions instead of using the precompiled wheel "
+            "(needed only for C/C++/CUDA changes; takes tens of minutes)"
+        ),
+    )
+    dev_build_parser.add_argument("--flashinfer-version", default=FLASHINFER_VERSION)
+    dev_build_parser.add_argument("--nccl-version", default=NCCL_VERSION)
     dev_build_parser.set_defaults(func=dev_build)
 
     dev_log_parser = dev_sub.add_parser("build-log", help="follow the development build log")

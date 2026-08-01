@@ -31,6 +31,10 @@ HF_SECRET_KEY = "HF_TOKEN"
 VLLM_DEV_REMOTE = "https://github.com/vllm-project/vllm.git"
 VLLM_DEV_BRANCH = "main"
 VLLM_BUILD_JOBS = 16
+# Deliberately ahead of requirements/cuda.txt: the Kimi-K3 kernels need it.
+FLASHINFER_VERSION = "0.6.16rc5"
+# vLLM resolves an older NCCL; pin it back up after installing.
+NCCL_VERSION = "2.30.7"
 
 # Stateless teardown allowlist. Keep this in sync with the label-bearing objects
 # emitted by manifesto.render. Values are kubectl resource names as reported by
@@ -650,15 +654,57 @@ if [ -d "$MANIFESTO_DEV_USER_ROOT/jit-cache" ]; then
   echo "Flushed jit-cache"
 fi
 
-nohup bash -c '
-  uv pip uninstall vllm || true
-  uv pip install -r requirements/build/cuda.txt
-  MAX_JOBS="$MANIFESTO_VLLM_BUILD_JOBS" \
-    uv pip install --no-build-isolation -e .
-' \
-  > "$MANIFESTO_DEV_USER_ROOT/build.log" 2>&1 &
+# A source build of the CUDA extensions takes tens of minutes, and almost every
+# dev iteration is Python-only. Default to the precompiled wheel, pinned to this
+# checkout's base commit in upstream main. The pin has to be explicit: setup.py
+# otherwise infers the base commit from the repo, and the checkout above has just
+# repointed origin at a fork, which breaks that inference.
+if [ -z "$MANIFESTO_VLLM_SOURCE_BUILD" ]; then
+  git fetch -q https://github.com/vllm-project/vllm.git main || true
+  BASE_COMMIT=$(git merge-base HEAD FETCH_HEAD 2>/dev/null || true)
+  if [ -z "$BASE_COMMIT" ]; then
+    echo "Could not resolve a base commit in upstream main; falling back to source build." >&2
+    MANIFESTO_VLLM_SOURCE_BUILD=1
+  fi
+fi
 
-echo "Build started ($MANIFESTO_VLLM_REMOTE $MANIFESTO_VLLM_BRANCH, jobs=$MANIFESTO_VLLM_BUILD_JOBS)"
+# Pins applied after vLLM, deliberately overriding what its requirements resolve:
+#   - flashinfer newer than requirements/cuda.txt, for the Kimi-K3 kernels. All
+#     three flashinfer packages must move together; a mismatch between them is a
+#     hard error at import, not a warning.
+#   - NCCL, which the vLLM install otherwise drags back to an older version.
+# Installing vLLM again without re-running these silently reverts both.
+POST_INSTALL='
+  uv pip install --extra-index-url https://flashinfer.ai/whl/ \
+    "flashinfer-python==$MANIFESTO_FLASHINFER_VERSION" \
+    "flashinfer-cubin==$MANIFESTO_FLASHINFER_VERSION" \
+    "flashinfer-jit-cache==$MANIFESTO_FLASHINFER_VERSION"
+  uv pip install "nvidia-nccl-cu13==$MANIFESTO_NCCL_VERSION"
+'
+
+if [ -n "$MANIFESTO_VLLM_SOURCE_BUILD" ]; then
+  nohup bash -c "
+    uv pip uninstall vllm || true
+    uv pip install -r requirements/build/cuda.txt
+    MAX_JOBS=\"\$MANIFESTO_VLLM_BUILD_JOBS\" \
+      uv pip install --no-build-isolation -e .
+    $POST_INSTALL
+  " \
+    > "$MANIFESTO_DEV_USER_ROOT/build.log" 2>&1 &
+  echo "Source build started ($MANIFESTO_VLLM_REMOTE $MANIFESTO_VLLM_BRANCH, jobs=$MANIFESTO_VLLM_BUILD_JOBS)"
+else
+  nohup bash -c "
+    uv pip uninstall vllm || true
+    VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_COMMIT=$BASE_COMMIT \
+      uv pip install -e . --torch-backend=auto
+    $POST_INSTALL
+  " \
+    > "$MANIFESTO_DEV_USER_ROOT/build.log" 2>&1 &
+  echo "Precompiled install started ($MANIFESTO_VLLM_REMOTE $MANIFESTO_VLLM_BRANCH)"
+  echo "Wheel pinned to upstream main commit $BASE_COMMIT"
+  echo "C/C++/CUDA changes are NOT picked up; use --source-build for those."
+fi
+echo "Then pinning flashinfer $MANIFESTO_FLASHINFER_VERSION and NCCL $MANIFESTO_NCCL_VERSION"
 echo "Follow with: manifesto dev build-log"
 '''
     return run(
@@ -675,6 +721,10 @@ echo "Follow with: manifesto dev build-log"
             f"MANIFESTO_VLLM_REMOTE={args.remote}",
             f"MANIFESTO_VLLM_BRANCH={args.branch}",
             f"MANIFESTO_VLLM_BUILD_JOBS={args.jobs}",
+            f"MANIFESTO_VLLM_SOURCE_BUILD="
+            f"{'1' if getattr(args, 'source_build', False) else ''}",
+            f"MANIFESTO_FLASHINFER_VERSION={args.flashinfer_version}",
+            f"MANIFESTO_NCCL_VERSION={args.nccl_version}",
             "bash",
             "-s",
         ],
