@@ -42,7 +42,7 @@ roles:
       moe_backend: deep_gemm_mega_moe
       kv_cache_dtype: fp8
       block_size: 128
-      attention_config: {use_prefill_query_quantization: true}
       no_disable_hybrid_kv_cache_manager: true
       no_enable_prefix_caching: true
       compilation_config: {cudagraph_mode: FULL_DECODE_ONLY}
+      attention-config: '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}'

@@ -35,7 +35,6 @@ roles:
       max_num_batched_tokens: 32
       moe_backend: deep_gemm_mega_moe
       kv_cache_dtype: fp8
-      attention_config: {use_prefill_query_quantization: true}
       no_disable_hybrid_kv_cache_manager: true
       no_enable_prefix_caching: true
       no_enable_flashinfer_autotune: true
@@ -44,6 +43,7 @@ roles:
       tool_call_parser: kimi_k3
       reasoning_parser: kimi_k3
 
+      attention-config: '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}'
   - name: prefill
     lws: {size: 4}
     parallelism: {dp: 16, ep: true}
@@ -67,7 +67,6 @@ roles:
       max_num_batched_tokens: 16384
       moe_backend: auto
       kv_cache_dtype: fp8
-      attention_config: {use_prefill_query_quantization: true}
       no_disable_hybrid_kv_cache_manager: true
       enable_prefix_caching: true
       no_enable_flashinfer_autotune: true
@@ -75,3 +74,4 @@ roles:
       enable_auto_tool_choice: true
       tool_call_parser: kimi_k3
       reasoning_parser: kimi_k3
+      attention-config: '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}'
