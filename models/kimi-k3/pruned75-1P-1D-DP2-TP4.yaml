@@ -61,6 +61,7 @@ roles:
       tool_call_parser: kimi_k3
       reasoning_parser: kimi_k3
 
+      attention-config: '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}'
   - name: prefill
     lws: {size: 2, same_topology_key: nvidia.com/gpu.clique}
     parallelism: {tp: 4, dp: 2, ep: true}
@@ -88,3 +89,4 @@ roles:
       enable_auto_tool_choice: true
       tool_call_parser: kimi_k3
       reasoning_parser: kimi_k3
+      attention-config: '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}'

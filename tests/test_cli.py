@@ -886,6 +886,10 @@ def test_dev_build_initializes_then_starts_background_build(monkeypatch):
     assert "uv pip install --no-build-isolation -e ." in build_script
 
 
+def _raise_no_cluster(*args, **kwargs):
+    raise workflow.WorkflowError("no cluster configured")
+
+
 def test_dev_shell_and_stop_do_not_require_cluster(monkeypatch):
     calls = []
     monkeypatch.setattr(
@@ -893,6 +897,9 @@ def test_dev_shell_and_stop_do_not_require_cluster(monkeypatch):
         "run",
         lambda cmd, *, input_text=None: calls.append(cmd) or 0,
     )
+    # Force the no-cluster path: otherwise this asserts against whatever cluster
+    # config happens to exist on the machine running the tests.
+    monkeypatch.setattr(workflow, "load_cluster_with_overrides", _raise_no_cluster)
 
     assert main(["dev", "shell", "--namespace", "workload-ns", "--user", "tester"]) == 0
     assert main(["dev", "stop", "--namespace", "workload-ns", "--user", "tester"]) == 0
@@ -906,6 +913,41 @@ def test_dev_shell_and_stop_do_not_require_cluster(monkeypatch):
             "pod/tester-vllm-dev",
             "--ignore-not-found=true",
         ],
+    ]
+
+
+def test_dev_shell_starts_in_the_source_checkout_when_known(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        workflow,
+        "run",
+        lambda cmd, *, input_text=None: calls.append(cmd) or 0,
+    )
+    # Both must be stubbed: dev_shell resolves the cluster path first, and on a
+    # machine with no cluster config that raises before the loader is reached.
+    monkeypatch.setattr(workflow, "resolve_cluster", lambda *args, **kwargs: "cluster.yaml")
+    monkeypatch.setattr(
+        workflow,
+        "load_cluster_with_overrides",
+        lambda *args, **kwargs: SimpleNamespace(
+            dev_source=lambda *, user, release: f"/src/{user}/vllm-dev"
+        ),
+    )
+
+    assert main(["dev", "shell", "--namespace", "workload-ns", "--user", "tester"]) == 0
+    assert calls == [
+        [
+            "kubectl",
+            "-n",
+            "workload-ns",
+            "exec",
+            "-it",
+            "tester-vllm-dev",
+            "--",
+            "/bin/zsh",
+            "-c",
+            "cd /src/tester/vllm-dev 2>/dev/null; exec /bin/zsh",
+        ]
     ]
 
 
