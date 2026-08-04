@@ -654,6 +654,8 @@ spec. Without either setting, the deployment uses vLLM from the model image.
 
 For the full cluster bootstrap and per-agent worktree workflow, see
 [vLLM Development with OpenShell, vllm-envs, and Manifesto](docs/vllm-development-workflow.md).
+The missing build-plane API is scoped separately in
+[vLLM Development Services](docs/vllm-development-services.md).
 
 ## Monitoring
 
