@@ -10,7 +10,12 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_IMAGE_CATALOG = ROOT / "config" / "images.yaml"
+PACKAGED_IMAGE_CATALOG = Path(__file__).resolve().parent / "data" / "images.yaml"
+DEFAULT_IMAGE_CATALOG = (
+    PACKAGED_IMAGE_CATALOG
+    if PACKAGED_IMAGE_CATALOG.exists()
+    else ROOT / "config" / "images.yaml"
+)
 
 
 @dataclass(frozen=True)
