@@ -222,16 +222,14 @@ def test_explicit_resource_gpu_request_overrides_inferred_request():
     assert spec.role("prefill").resources.gpus == 1
 
 
-def test_cluster_path_templates_feed_cache_dev_and_logs():
+def test_cluster_path_templates_feed_cache_external_env_and_logs():
     cluster = CLUSTER.with_path_overrides(
         user_root="/vol/{user}",
         log_root="/logs/{user}/{release}",
         cache_root="/cache/{user}/{release}/{gpu_arch}/{cuda}/{cache_key}",
-        dev_venv="/venvs/{user}/{release}",
-        dev_source="/src/{user}",
     )
     spec = load_spec(DEEPSEEK, cluster)
-    spec.runtime.dev = True
+    spec.runtime.vllm_env = "/mnt/shared/tester-name/vllm-envs/feature"
     role = spec.role("decode")
     instance = Instance("Tester.Name", spec.release)
 
@@ -240,14 +238,15 @@ def test_cluster_path_templates_feed_cache_dev_and_logs():
     lws = next(obj for obj in objects if obj["kind"] == "LeaderWorkerSet" and obj["metadata"]["name"].endswith("decode"))
     script = lws["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"]["containers"][0]["args"][0]
 
-    assert resolved.env["MANIFESTO_VLLM_DEV_VENV"] == "/venvs/tester-name/wide-ep-1p-ep8-1d-ep8"
+    assert resolved.env["MANIFESTO_VLLM_ENV"] == "/mnt/shared/tester-name/vllm-envs/feature"
     assert resolved.env["VLLM_CACHE_ROOT"] == "/cache/tester-name/wide-ep-1p-ep8-1d-ep8/gb200/cu13/latest/vllm"
     assert resolved.env["HOME"] == "/cache/tester-name/wide-ep-1p-ep8-1d-ep8/gb200/cu13/latest/home"
     assert "USER" not in resolved.env
     assert resolved.env["TRITON_CACHE_DIR"].endswith("/latest/triton")
     assert resolved.env["TORCHINDUCTOR_CACHE_DIR"].endswith("/latest/torchinductor")
     assert "LOG_DIR=/logs/tester-name/wide-ep-1p-ep8-1d-ep8/decode" in script
-    assert "find /src/tester-name/vllm" in script
+    assert 'source "${MANIFESTO_VLLM_ENV}/.venv/bin/activate"' in script
+    assert "vllm-envs environment is incomplete" in script
     assert "ucx-lib" not in script
 
 

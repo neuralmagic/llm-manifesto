@@ -22,20 +22,11 @@ from .instance import Instance
 from .overrides import load_routing_profile
 from .render import render, render_to_yaml
 from .render.bootstrap import render_bootstrap
-from .render.devpod import render_dev_pod
 from .spec import EppSpec, RoutingKind, load_spec
 
 
 HF_SECRET_NAME = "hf-secret"
 HF_SECRET_KEY = "HF_TOKEN"
-VLLM_DEV_REMOTE = "https://github.com/vllm-project/vllm.git"
-VLLM_DEV_BRANCH = "main"
-VLLM_BUILD_JOBS = 16
-# Deliberately ahead of requirements/cuda.txt: the Kimi-K3 kernels need it.
-FLASHINFER_VERSION = "0.6.16rc5"
-# vLLM resolves an older NCCL; pin it back up after installing.
-NCCL_VERSION = "2.30.7"
-
 # Stateless teardown allowlist. Keep this in sync with the label-bearing objects
 # emitted by manifesto.render. Values are kubectl resource names as reported by
 # ``kubectl api-resources -o name``.
@@ -326,8 +317,6 @@ def load_cluster_with_overrides(cluster_path: str, args):
         user_root=getattr(args, "user_root", None),
         log_root=getattr(args, "log_root", None),
         cache_root=getattr(args, "cache_root", None),
-        dev_venv=getattr(args, "dev_venv", None),
-        dev_source=getattr(args, "dev_source", None),
     )
 
 
@@ -335,10 +324,8 @@ def apply_runtime_overrides(spec, args, config: RuntimeConfig) -> None:
     spec.namespace = config.namespace
     if getattr(args, "accelerator", None):
         spec.accelerator = args.accelerator
-    if getattr(args, "dev", False):
-        spec.runtime.dev = True
-    if getattr(args, "dev_venv", None):
-        spec.runtime.dev_venv = args.dev_venv
+    if getattr(args, "vllm_env", None) is not None:
+        spec.runtime.vllm_env = args.vllm_env
     spec.runtime.pre_launch.extend(getattr(args, "pre_launch", None) or [])
     routing_profile = getattr(args, "routing_profile", None) or os.environ.get(
         "MANIFESTO_ROUTING_PROFILE"
@@ -385,8 +372,6 @@ def manifest_header(args, config: RuntimeConfig, *, routing_only: bool) -> list[
         "--user",
         config.user,
     ]
-    if getattr(args, "dev", False):
-        command.append("--dev")
     if getattr(args, "accelerator", None):
         command.extend(["--gpu", args.accelerator])
     routing_profile = getattr(args, "routing_profile", None) or os.environ.get(
@@ -394,7 +379,7 @@ def manifest_header(args, config: RuntimeConfig, *, routing_only: bool) -> list[
     )
     if routing_profile:
         command.extend(["--routing-profile", routing_profile])
-    for name in ("user_root", "log_root", "cache_root", "dev_venv", "dev_source"):
+    for name in ("user_root", "log_root", "cache_root", "vllm_env"):
         value = getattr(args, name, None)
         if value:
             command.extend([f"--{name.replace('_', '-')}", value])
@@ -470,292 +455,6 @@ def sync_hf_secret(config: RuntimeConfig) -> int:
         [*config.kubectl(), "apply", "-f", "-"],
         input_text=json.dumps(secret),
     )
-
-
-def _dev_identity(config: RuntimeConfig) -> tuple[Instance, str]:
-    instance = Instance(user=config.user, release="dev")
-    return instance, instance.user_scoped_name("vllm-dev")
-
-
-def _dev_paths(
-    config: RuntimeConfig,
-    args,
-    *,
-    cluster: Cluster | None = None,
-) -> tuple[Cluster, str, str, str]:
-    cluster = cluster or load_runtime_cluster(config, args)
-    instance, _ = _dev_identity(config)
-    user = instance.user_slug
-    return (
-        cluster,
-        cluster.user_root(user=user, release=""),
-        cluster.dev_source(user=user, release=""),
-        cluster.dev_venv(user=user, release=""),
-    )
-
-
-def dev_start(
-    args,
-    *,
-    config: RuntimeConfig | None = None,
-    cluster: Cluster | None = None,
-) -> int:
-    """Create the persistent dev pod and initialize its checkout and venv."""
-    config = config or RuntimeConfig.from_args(args)
-    cluster, _, _, _ = _dev_paths(config, args, cluster=cluster)
-    accelerator = cluster.accelerators.get(args.accelerator)
-    _, pod_name = _dev_identity(config)
-
-    rc = sync_hf_secret(config)
-    if rc:
-        return rc
-    rc = run(
-        [*config.kubectl(), "apply", "-f", "-"],
-        input_text=render_to_yaml(
-            [
-                render_dev_pod(
-                    cluster,
-                    config.user,
-                    accelerator,
-                    image=getattr(args, "image", None),
-                    cpu=getattr(args, "dev_cpu", None),
-                    memory=getattr(args, "dev_memory", None),
-                    gpus=getattr(args, "dev_gpus", None),
-                )
-            ]
-        ),
-    )
-    if rc:
-        return rc
-    rc = run(
-        [
-            *config.kubectl(),
-            "wait",
-            "--for=condition=Ready",
-            f"pod/{pod_name}",
-            "--timeout=300s",
-        ]
-    )
-    if rc:
-        return rc
-    return dev_init(args, config=config, cluster=cluster)
-
-
-def dev_init(
-    args,
-    *,
-    config: RuntimeConfig | None = None,
-    cluster: Cluster | None = None,
-) -> int:
-    """Idempotently initialize the per-user vLLM checkout and virtualenv."""
-    config = config or RuntimeConfig.from_args(args)
-    _, user_root, source, venv = _dev_paths(config, args, cluster=cluster)
-    _, pod_name = _dev_identity(config)
-    remote = getattr(args, "remote", VLLM_DEV_REMOTE)
-    branch = getattr(args, "branch", VLLM_DEV_BRANCH)
-    script = r'''set -euo pipefail
-mkdir -p "$MANIFESTO_DEV_USER_ROOT"
-
-if [ -d "$MANIFESTO_DEV_SOURCE/.git" ]; then
-  echo "Using existing vLLM checkout at $MANIFESTO_DEV_SOURCE"
-elif [ -e "$MANIFESTO_DEV_SOURCE" ] && [ ! -d "$MANIFESTO_DEV_SOURCE" ]; then
-  echo "Error: $MANIFESTO_DEV_SOURCE exists and is not a directory" >&2
-  exit 1
-elif [ -n "$(find "$MANIFESTO_DEV_SOURCE" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
-  echo "Error: $MANIFESTO_DEV_SOURCE exists, is not empty, and is not a git checkout" >&2
-  exit 1
-else
-  echo "Cloning $MANIFESTO_VLLM_REMOTE ($MANIFESTO_VLLM_BRANCH) to $MANIFESTO_DEV_SOURCE"
-  git clone --branch "$MANIFESTO_VLLM_BRANCH" --single-branch \
-    "$MANIFESTO_VLLM_REMOTE" "$MANIFESTO_DEV_SOURCE"
-fi
-
-if [ -f "$MANIFESTO_DEV_VENV/bin/activate" ]; then
-  echo "Using existing vLLM venv at $MANIFESTO_DEV_VENV"
-elif [ -e "$MANIFESTO_DEV_VENV" ]; then
-  echo "Error: $MANIFESTO_DEV_VENV exists but is not a complete virtualenv" >&2
-  exit 1
-elif [ -f /opt/vllm/bin/activate ]; then
-  echo "Seeding vLLM venv from /opt/vllm at $MANIFESTO_DEV_VENV"
-  cp -a /opt/vllm "$MANIFESTO_DEV_VENV"
-else
-  echo "Creating vLLM venv at $MANIFESTO_DEV_VENV"
-  uv venv --python /usr/bin/python3.12 "$MANIFESTO_DEV_VENV"
-fi
-'''
-    return run(
-        [
-            *config.kubectl(),
-            "exec",
-            "-i",
-            pod_name,
-            "--",
-            "env",
-            f"MANIFESTO_DEV_VENV={venv}",
-            f"MANIFESTO_DEV_SOURCE={source}",
-            f"MANIFESTO_DEV_USER_ROOT={user_root}",
-            f"MANIFESTO_VLLM_REMOTE={remote}",
-            f"MANIFESTO_VLLM_BRANCH={branch}",
-            "bash",
-            "-s",
-        ],
-        input_text=script,
-    )
-
-
-def dev_shell(args) -> int:
-    config = RuntimeConfig.from_args(args, require_cluster=False)
-    instance, pod_name = _dev_identity(config)
-    source = None
-    try:
-        cluster = load_cluster_with_overrides(
-            config.cluster_path or resolve_cluster(), args
-        )
-        source = cluster.dev_source(user=instance.user_slug, release="")
-    except WorkflowError:
-        pass
-    if source:
-        return run([
-            *config.kubectl(), "exec", "-it", pod_name, "--",
-            "/bin/zsh", "-c", f"cd {shlex.quote(source)} 2>/dev/null; exec /bin/zsh",
-        ])
-    return run([*config.kubectl(), "exec", "-it", pod_name, "--", "/bin/zsh"])
-
-
-def dev_build(args) -> int:
-    config = RuntimeConfig.from_args(args)
-    rc = dev_init(args, config=config)
-    if rc:
-        return rc
-    _, user_root, source, venv = _dev_paths(config, args)
-    _, pod_name = _dev_identity(config)
-    script = r'''set -euo pipefail
-VENV_PYTHON="$MANIFESTO_DEV_VENV/bin/python"
-if [ "$(readlink "$VENV_PYTHON")" != "/usr/bin/python3.12" ]; then
-  echo "Repointing venv python: $(readlink "$VENV_PYTHON") -> /usr/bin/python3.12"
-  ln -sf /usr/bin/python3.12 "$VENV_PYTHON"
-fi
-
-source "$MANIFESTO_DEV_VENV/bin/activate"
-# Toolchain images may constrain the PyTorch version used to build their baked
-# vLLM checkout. A mutable dev checkout must resolve against its own revision.
-unset UV_CONSTRAINT
-cd "$MANIFESTO_DEV_SOURCE"
-PREVIOUS_HEAD=$(git rev-parse HEAD 2>/dev/null || true)
-git remote set-url origin "$MANIFESTO_VLLM_REMOTE"
-git fetch origin
-git checkout "$MANIFESTO_VLLM_BRANCH"
-git reset --hard "origin/$MANIFESTO_VLLM_BRANCH"
-CURRENT_HEAD=$(git rev-parse HEAD)
-
-# An editable install leaves generated package metadata in the shared checkout.
-# Move it aside before resolving a different revision so stale dependency pins
-# (notably the exact PyTorch version) cannot be combined with the new tree.
-if [ -d vllm.egg-info ]; then
-  mv vllm.egg-info "vllm.egg-info.old.$(date +%s)"
-  echo "Flushed stale vllm.egg-info"
-fi
-
-if [ "$PREVIOUS_HEAD" != "$CURRENT_HEAD" ] && [ -d .deps ]; then
-  mv .deps ".deps.old.$(date +%s)"
-  echo "Flushed stale native dependency sources"
-fi
-
-if [ -d "$MANIFESTO_DEV_USER_ROOT/jit-cache" ]; then
-  mv "$MANIFESTO_DEV_USER_ROOT/jit-cache" \
-    "$MANIFESTO_DEV_USER_ROOT/jit-cache.old.$(date +%s)"
-  echo "Flushed jit-cache"
-fi
-
-# A source build of the CUDA extensions takes tens of minutes, and almost every
-# dev iteration is Python-only. Default to the precompiled wheel, pinned to this
-# checkout's base commit in upstream main. The pin has to be explicit: setup.py
-# otherwise infers the base commit from the repo, and the checkout above has just
-# repointed origin at a fork, which breaks that inference.
-if [ -z "$MANIFESTO_VLLM_SOURCE_BUILD" ]; then
-  git fetch -q https://github.com/vllm-project/vllm.git main || true
-  BASE_COMMIT=$(git merge-base HEAD FETCH_HEAD 2>/dev/null || true)
-  if [ -z "$BASE_COMMIT" ]; then
-    echo "Could not resolve a base commit in upstream main; falling back to source build." >&2
-    MANIFESTO_VLLM_SOURCE_BUILD=1
-  fi
-fi
-
-# Pins applied after vLLM, deliberately overriding what its requirements resolve:
-#   - flashinfer newer than requirements/cuda.txt, for the Kimi-K3 kernels. All
-#     three flashinfer packages must move together; a mismatch between them is a
-#     hard error at import, not a warning.
-#   - NCCL, which the vLLM install otherwise drags back to an older version.
-# Installing vLLM again without re-running these silently reverts both.
-POST_INSTALL='
-  uv pip install --extra-index-url https://flashinfer.ai/whl/ \
-    "flashinfer-python==$MANIFESTO_FLASHINFER_VERSION" \
-    "flashinfer-cubin==$MANIFESTO_FLASHINFER_VERSION" \
-    "flashinfer-jit-cache==$MANIFESTO_FLASHINFER_VERSION"
-  uv pip install "nvidia-nccl-cu13==$MANIFESTO_NCCL_VERSION"
-'
-
-if [ -n "$MANIFESTO_VLLM_SOURCE_BUILD" ]; then
-  nohup bash -c "
-    uv pip uninstall vllm || true
-    uv pip install -r requirements/build/cuda.txt
-    MAX_JOBS=\"\$MANIFESTO_VLLM_BUILD_JOBS\" \
-      uv pip install --no-build-isolation -e .
-    $POST_INSTALL
-  " \
-    > "$MANIFESTO_DEV_USER_ROOT/build.log" 2>&1 &
-  echo "Source build started ($MANIFESTO_VLLM_REMOTE $MANIFESTO_VLLM_BRANCH, jobs=$MANIFESTO_VLLM_BUILD_JOBS)"
-else
-  nohup bash -c "
-    uv pip uninstall vllm || true
-    VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_COMMIT=$BASE_COMMIT \
-      uv pip install -e . --torch-backend=auto
-    $POST_INSTALL
-  " \
-    > "$MANIFESTO_DEV_USER_ROOT/build.log" 2>&1 &
-  echo "Precompiled install started ($MANIFESTO_VLLM_REMOTE $MANIFESTO_VLLM_BRANCH)"
-  echo "Wheel pinned to upstream main commit $BASE_COMMIT"
-  echo "C/C++/CUDA changes are NOT picked up; use --source-build for those."
-fi
-echo "Then pinning flashinfer $MANIFESTO_FLASHINFER_VERSION and NCCL $MANIFESTO_NCCL_VERSION"
-echo "Follow with: manifesto dev build-log"
-'''
-    return run(
-        [
-            *config.kubectl(),
-            "exec",
-            "-i",
-            pod_name,
-            "--",
-            "env",
-            f"MANIFESTO_DEV_VENV={venv}",
-            f"MANIFESTO_DEV_SOURCE={source}",
-            f"MANIFESTO_DEV_USER_ROOT={user_root}",
-            f"MANIFESTO_VLLM_REMOTE={args.remote}",
-            f"MANIFESTO_VLLM_BRANCH={args.branch}",
-            f"MANIFESTO_VLLM_BUILD_JOBS={args.jobs}",
-            f"MANIFESTO_VLLM_SOURCE_BUILD="
-            f"{'1' if getattr(args, 'source_build', False) else ''}",
-            f"MANIFESTO_FLASHINFER_VERSION={args.flashinfer_version}",
-            f"MANIFESTO_NCCL_VERSION={args.nccl_version}",
-            "bash",
-            "-s",
-        ],
-        input_text=script,
-    )
-
-
-def dev_build_log(args) -> int:
-    config = RuntimeConfig.from_args(args)
-    _, user_root, _, _ = _dev_paths(config, args)
-    _, pod_name = _dev_identity(config)
-    return run([*config.kubectl(), "exec", pod_name, "--", "tail", "-f", f"{user_root}/build.log"])
-
-
-def dev_stop(args, *, config: RuntimeConfig | None = None) -> int:
-    config = config or RuntimeConfig.from_args(args, require_cluster=False)
-    _, pod_name = _dev_identity(config)
-    return run([*config.kubectl(), "delete", f"pod/{pod_name}", "--ignore-not-found=true"])
 
 
 def _objects_from_list(raw: str) -> list[dict]:

@@ -55,7 +55,7 @@ def build_launch_script(
     *,
     log_dir: str | None,
     trace_dir: str | None = None,
-    dev_source: str | None,
+    vllm_env: str | None,
     persistent_cache: bool = False,
     vllm_args: dict[str, Any] | None = None,
     external_dp: bool = False,
@@ -118,15 +118,18 @@ def build_launch_script(
             "trap on_exit EXIT",
             "",
         ]
-    if dev_source:
+    if vllm_env:
         lines += [
-            f"find {shlex.quote(dev_source + '/vllm')} -name __pycache__ -type d -exec rm -rf {{}} + 2>/dev/null || true",
-            'if [ -n "${MANIFESTO_VLLM_DEV_VENV:-}" ] && [ -d "${MANIFESTO_VLLM_DEV_VENV}" ]; then',
-            '  echo "Using dev venv at ${MANIFESTO_VLLM_DEV_VENV}"',
-            '  source "${MANIFESTO_VLLM_DEV_VENV}/bin/activate"',
-            "elif [ -f /opt/vllm/bin/activate ]; then",
-            "  source /opt/vllm/bin/activate",
+            'if [ ! -d "${MANIFESTO_VLLM_ENV}" ]; then',
+            '  echo "Error: vllm-envs worktree not found at ${MANIFESTO_VLLM_ENV}" >&2',
+            "  exit 1",
             "fi",
+            'if [ ! -f "${MANIFESTO_VLLM_ENV}/.venv/bin/activate" ]; then',
+            '  echo "Error: vllm-envs environment is incomplete: ${MANIFESTO_VLLM_ENV}/.venv/bin/activate is missing" >&2',
+            "  exit 1",
+            "fi",
+            'echo "Using vllm-envs worktree at ${MANIFESTO_VLLM_ENV}"',
+            'source "${MANIFESTO_VLLM_ENV}/.venv/bin/activate"',
             "",
         ]
     else:

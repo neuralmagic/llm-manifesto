@@ -41,8 +41,8 @@ The repository contains:
 - `manifesto/` - Python renderer implementation and CLI.
 - `models/` - Model deployment specs.
 - `clusters/` - Cluster profiles.
-- The persistent dev pod for building vLLM from source is managed by
-  `manifesto dev` using the image configured in `config/images.yaml`.
+- Existing vLLM development worktrees are created and managed by `vllm-envs`;
+  Manifesto only consumes them through `--vllm-env` or `runtime.vllm_env`.
 - `monitoring/` - Namespace-scoped Prometheus and Grafana stack.
 - `tests/` - Renderer, validation, and UX regression tests.
 
@@ -83,30 +83,21 @@ Renderer workflow:
 manifesto render bootstrap
 manifesto deploy bootstrap
 manifesto render manifest models/qwen/aggregated.yaml
-manifesto render file models/deepseek-v4/1P-EP8-1D-EP8.yaml --dev
+manifesto render file models/deepseek-v4/1P-EP8-1D-EP8.yaml
 manifesto file diff
 manifesto file apply
-manifesto deploy models/deepseek-v4/1P-EP8-1D-EP8.yaml --dev
+manifesto deploy models/deepseek-v4/1P-EP8-1D-EP8.yaml \
+  --vllm-env /mnt/shared/$USER/vllm-envs/feature
 manifesto ready models/deepseek-v4/1P-EP8-1D-EP8.yaml
 manifesto stop
 manifesto stop models/deepseek-v4/1P-EP8-1D-EP8.yaml
-```
-
-Dev vLLM workflow:
-
-```bash
-manifesto dev start
-manifesto dev shell
-manifesto dev build
-manifesto dev build-log
-manifesto dev stop
 ```
 
 ## Key Configuration Files
 
 - `pyproject.toml` - Python package metadata and test configuration.
 - `config/images.yaml` - Central image catalog for model, llm-d, sidecar, and
-  dev images.
+  test images.
 - `clusters/example-gb200.yaml` - Synthetic GB200 profile.
 - `clusters/example-h200.yaml` - Synthetic H200 profile.
 - `models/qwen/aggregated.yaml` - Aggregated Qwen example.
@@ -121,7 +112,8 @@ manifesto dev stop
 2. Inspect or edit the generated YAML.
 3. Apply with `manifesto file apply` or deploy directly with `manifesto deploy`.
 4. Wait with `manifesto ready`.
-5. Use `manifesto dev start` and `manifesto dev build` for vLLM source iteration.
+5. Use `vllm-envs` for vLLM source iteration and pass the resulting worktree to
+   Manifesto with `--vllm-env` when needed.
 
 ## Important Notes
 

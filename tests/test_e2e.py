@@ -34,13 +34,6 @@ def test_e2e_runs_in_cluster_job_against_routed_gateway(monkeypatch):
             return json.dumps({"status": {"succeeded": 1}})
         raise AssertionError(cmd)
 
-    def fake_dev_start(_args, *, config, cluster):
-        lifecycle.append("dev-start")
-        rendered = yaml.safe_dump(workflow.render_dev_pod(cluster, config.user))
-        assert "persistentVolumeClaim" not in rendered
-        assert "emptyDir" in rendered
-        return 0
-
     def fake_deploy(args, *, config, cluster):
         lifecycle.append("deploy")
         rendered = workflow.render_manifest(args, config, cluster=cluster)
@@ -50,12 +43,6 @@ def test_e2e_runs_in_cluster_job_against_routed_gateway(monkeypatch):
 
     monkeypatch.setattr(workflow, "run", fake_run)
     monkeypatch.setattr(workflow, "capture", fake_capture)
-    monkeypatch.setattr(workflow, "dev_start", fake_dev_start)
-    monkeypatch.setattr(
-        workflow,
-        "dev_stop",
-        lambda _args, **_kwargs: lifecycle.append("dev-stop") or 0,
-    )
     monkeypatch.setattr(workflow, "deploy", fake_deploy)
     monkeypatch.setattr(
         workflow,
@@ -80,7 +67,7 @@ def test_e2e_runs_in_cluster_job_against_routed_gateway(monkeypatch):
     )
 
     assert rc == 0
-    assert lifecycle == ["dev-start", "dev-stop", "deploy", "ready"]
+    assert lifecycle == ["deploy", "ready"]
     assert calls[0][0] == ["kubectl", "create", "namespace", "workload-ns"]
     create_cmd, manifest = calls[1]
     assert create_cmd == ["kubectl", "-n", "workload-ns", "create", "-f", "-"]
@@ -119,8 +106,9 @@ def test_e2e_runs_in_cluster_job_against_routed_gateway(monkeypatch):
     ]
 
 
-def test_e2e_targets_direct_service_and_can_keep_namespace(monkeypatch):
+def test_e2e_can_use_external_env_with_cluster_storage_and_keep_namespace(monkeypatch):
     calls = []
+    lifecycle = []
     monkeypatch.setattr(
         workflow,
         "run",
@@ -133,9 +121,15 @@ def test_e2e_targets_direct_service_and_can_keep_namespace(monkeypatch):
             "" if "namespace/workload-ns" in cmd else json.dumps({"status": {"succeeded": 1}})
         ),
     )
-    monkeypatch.setattr(workflow, "dev_start", lambda _args, **_kwargs: 0)
-    monkeypatch.setattr(workflow, "dev_stop", lambda _args, **_kwargs: 0)
-    monkeypatch.setattr(workflow, "deploy", lambda _args, **_kwargs: 0)
+    def fake_deploy(args, *, config, cluster):
+        lifecycle.append("deploy")
+        rendered = workflow.render_manifest(args, config, cluster=cluster)
+        assert "persistentVolumeClaim" in rendered
+        assert "name: MANIFESTO_VLLM_ENV" in rendered
+        assert "value: /mnt/shared/tester/vllm-envs/feature" in rendered
+        return 0
+
+    monkeypatch.setattr(workflow, "deploy", fake_deploy)
     monkeypatch.setattr(workflow, "ready", lambda _args, **_kwargs: 0)
 
     rc = main(
@@ -149,11 +143,14 @@ def test_e2e_targets_direct_service_and_can_keep_namespace(monkeypatch):
             "workload-ns",
             "--user",
             "tester",
+            "--vllm-env",
+            "/mnt/shared/tester/vllm-envs/feature",
             "--keep-namespace",
         ]
     )
 
     assert rc == 0
+    assert lifecycle == ["deploy"]
     job = yaml.safe_load(calls[1][1])
     assert job["spec"]["template"]["spec"]["containers"][0]["env"][0]["value"] == (
         "http://tester-qwen3-0-6b-decode-svc.workload-ns.svc.cluster.local:8000/v1"

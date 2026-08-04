@@ -60,17 +60,6 @@ class PathsConfig(BaseModel):
     cache_root: str | None = None
 
 
-class DevConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    image: str = Field(default_factory=lambda: DEFAULT_IMAGES.get("dev.image"))
-    cpu: str = "32"
-    memory: str = "512Gi"
-    gpus: int = Field(1, ge=0)
-    venv: str | None = None
-    source: str | None = None
-
-
 class CacheConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -259,7 +248,6 @@ class Cluster(BaseModel):
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
-    dev: DevConfig = Field(default_factory=DevConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     rdma: RdmaConfig = Field(default_factory=RdmaConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
@@ -311,22 +299,6 @@ class Cluster(BaseModel):
             return f"/mnt/local/jit-cache/{{gpu_arch}}/{{cuda}}/{{cache_key}}/{{release}}"
         return None
 
-    @property
-    def dev_venv_template(self) -> str | None:
-        if self.dev.venv:
-            return self.dev.venv
-        if self.storage.shared_volume:
-            return f"{self.storage.shared_mount_path}/{{user}}/vllm-venv"
-        return None
-
-    @property
-    def dev_source_template(self) -> str | None:
-        if self.dev.source:
-            return self.dev.source
-        if self.storage.shared_volume:
-            return f"{self.storage.shared_mount_path}/{{user}}/vllm-dev"
-        return None
-
     def user_root(self, *, user: str, release: str) -> str:
         return self.user_root_template.format(user=user, release=release)
 
@@ -342,16 +314,6 @@ class Cluster(BaseModel):
             user=user, release=release, gpu_arch=gpu_arch, cuda=cuda, cache_key=cache_key
         )
 
-    def dev_venv(self, *, user: str, release: str) -> str:
-        if self.dev_venv_template is None:
-            raise ValueError("development mode requires a configured venv filesystem")
-        return self.dev_venv_template.format(user=user, release=release)
-
-    def dev_source(self, *, user: str, release: str) -> str:
-        if self.dev_source_template is None:
-            raise ValueError("development mode requires a configured source filesystem")
-        return self.dev_source_template.format(user=user, release=release)
-
     @property
     def has_cache_filesystem(self) -> bool:
         return self.cache_root_template is not None
@@ -366,8 +328,6 @@ class Cluster(BaseModel):
         user_root: str | None = None,
         log_root: str | None = None,
         cache_root: str | None = None,
-        dev_venv: str | None = None,
-        dev_source: str | None = None,
     ) -> "Cluster":
         cluster = self.model_copy(deep=True)
         if user_root:
@@ -376,10 +336,6 @@ class Cluster(BaseModel):
             cluster.logging.root = log_root
         if cache_root:
             cluster.paths.cache_root = cache_root
-        if dev_venv:
-            cluster.dev.venv = dev_venv
-        if dev_source:
-            cluster.dev.source = dev_source
         return cluster
 
     def base_volumes(self) -> list[dict]:

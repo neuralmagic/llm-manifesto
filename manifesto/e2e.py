@@ -15,7 +15,6 @@ from .cluster import Cluster
 from .images import DEFAULT_IMAGES
 from .instance import Instance
 from .render import render, render_to_yaml
-from .render.devpod import render_dev_pod
 from .resolve import resolve_role
 from .spec import DeploymentSpec, RoutingKind, load_spec
 
@@ -106,13 +105,10 @@ def _preflight(
 ) -> DeploymentSpec:
     spec = load_spec(workflow.resolve_model(args.spec), cluster)
     workflow.apply_runtime_overrides(spec, args, config)
-    accelerator = cluster.accelerators.get(args.accelerator)
-    objects = [
-        render_dev_pod(cluster, config.user, accelerator),
-        *render(spec, user=config.user, cluster=cluster),
-    ]
-    if any(obj.get("kind") == "PersistentVolumeClaim" for obj in objects) or _contains_key(
-        objects, "persistentVolumeClaim"
+    objects = render(spec, user=config.user, cluster=cluster)
+    if not spec.runtime.vllm_env and (
+        any(obj.get("kind") == "PersistentVolumeClaim" for obj in objects)
+        or _contains_key(objects, "persistentVolumeClaim")
     ):
         raise workflow.WorkflowError(
             "PVC-free e2e preflight found a persistentVolumeClaim reference",
@@ -307,15 +303,10 @@ def _run_lifecycle(
     cluster: Cluster,
     spec: DeploymentSpec,
 ) -> int:
-    print("Phase 1/2: initializing the PVC-free dev environment...")
-    rc = workflow.dev_start(args, config=config, cluster=cluster)
-    if rc:
-        return rc
-    rc = workflow.dev_stop(args, config=config)
-    if rc:
-        return rc
-
-    print("Phase 2/2: deploying the model with disposable emptyDir storage...")
+    if spec.runtime.vllm_env:
+        print(f"Deploying with existing vllm-envs worktree {spec.runtime.vllm_env}...")
+    else:
+        print("Deploying with the image vLLM and disposable emptyDir storage...")
     rc = workflow.deploy(args, config=config, cluster=cluster)
     if rc:
         return rc
@@ -326,7 +317,7 @@ def _run_lifecycle(
 
 
 def e2e(args: argparse.Namespace) -> int:
-    """Exercise dev initialization and inference in a fresh namespace."""
+    """Exercise an image or external vllm-envs environment in a fresh namespace."""
 
     if args.timeout < 1:
         raise workflow.WorkflowError("--timeout must be at least 1 second", code=2)
@@ -338,9 +329,13 @@ def e2e(args: argparse.Namespace) -> int:
     )
     run_args = argparse.Namespace(**vars(args))
     run_args.namespace = namespace
-    run_args.dev = False
     config = workflow.RuntimeConfig.from_args(run_args)
-    cluster = ephemeral_cluster(workflow.load_runtime_cluster(config, run_args))
+    configured_cluster = workflow.load_runtime_cluster(config, run_args)
+    configured_spec = load_spec(workflow.resolve_model(run_args.spec), configured_cluster)
+    use_external_env = (
+        run_args.vllm_env is not None or configured_spec.runtime.vllm_env is not None
+    )
+    cluster = configured_cluster if use_external_env else ephemeral_cluster(configured_cluster)
     spec = _preflight(run_args, config, cluster)
 
     existing = workflow.capture(

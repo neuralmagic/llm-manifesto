@@ -28,6 +28,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["manifesto"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"config/images.yaml" = "manifesto/data/images.yaml"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

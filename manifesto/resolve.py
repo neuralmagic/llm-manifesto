@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import posixpath
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
 
 from .cluster import Cluster
@@ -24,7 +26,7 @@ class ResolvedRole:
     ports: RolePorts
     log_dir: str | None
     trace_dir: str | None
-    dev_source: str | None
+    vllm_env: str | None
     persistent_cache: bool
     fabric_profile: str
     env: dict[str, str]
@@ -79,15 +81,9 @@ def resolve_role(spec: DeploymentSpec, instance: Instance, cluster: Cluster, rol
             cuda=spec.cache.cuda,
             cache_key=spec.cache_key,
         )
-    dev_venv = None
-    dev_source = None
-    if spec.runtime.dev:
-        dev_venv = spec.runtime.dev_venv or cluster.dev_venv(
-            user=instance.user_slug, release=instance.release_slug
-        )
-        dev_source = cluster.dev_source(
-            user=instance.user_slug, release=instance.release_slug
-        )
+    vllm_env = spec.runtime.vllm_env
+    if vllm_env is not None:
+        _validate_vllm_env_path(vllm_env, cluster)
     env, env_provenance = _resolve_env(
         (
             (
@@ -95,7 +91,7 @@ def resolve_role(spec: DeploymentSpec, instance: Instance, cluster: Cluster, rol
                 _base_env(
                     spec,
                     cache_prefix,
-                    dev_venv=dev_venv,
+                    vllm_env=vllm_env,
                     platform=cluster.platform,
                 ),
             ),
@@ -126,7 +122,7 @@ def resolve_role(spec: DeploymentSpec, instance: Instance, cluster: Cluster, rol
         ports=ports,
         log_dir=log_dir,
         trace_dir=trace_dir,
-        dev_source=dev_source,
+        vllm_env=vllm_env,
         persistent_cache=cache_prefix is not None,
         fabric_profile=fabric_profile,
         env=env,
@@ -164,7 +160,7 @@ def _base_env(
     spec: DeploymentSpec,
     cache_prefix: str | None,
     *,
-    dev_venv: str | None,
+    vllm_env: str | None,
     platform: str,
 ) -> dict[str, str]:
     env = {
@@ -186,13 +182,26 @@ def _base_env(
             "TORCHINDUCTOR_CACHE_DIR": f"{cache_prefix}/torchinductor",
             "TILELANG_CACHE_DIR": f"{cache_prefix}/tilelang",
         }
-    if dev_venv:
-        env["MANIFESTO_VLLM_DEV_VENV"] = dev_venv
+    if vllm_env:
+        env["MANIFESTO_VLLM_ENV"] = vllm_env
     if platform == "openshift":
         # OpenShift commonly assigns an arbitrary UID absent from /etc/passwd.
         # Python getpass (used by torch during import) honors USER first.
         env["USER"] = "vllm"
     return env
+
+
+def _validate_vllm_env_path(vllm_env: str, cluster: Cluster) -> None:
+    path = PurePosixPath(posixpath.normpath(vllm_env))
+    if not path.is_absolute():
+        raise ValueError("runtime.vllm_env must be an absolute path")
+    mount_paths = [PurePosixPath(mount["mountPath"]) for mount in cluster.volume_mounts()]
+    if not any(path == mount or path.is_relative_to(mount) for mount in mount_paths):
+        rendered = ", ".join(str(mount) for mount in mount_paths)
+        raise ValueError(
+            f"runtime.vllm_env {vllm_env!r} is not covered by a model pod volume mount "
+            f"({rendered})"
+        )
 
 
 def _resolve_env(

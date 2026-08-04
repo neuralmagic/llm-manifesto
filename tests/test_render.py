@@ -11,9 +11,8 @@ import yaml
 from manifesto.cluster import load_cluster
 from manifesto.images import DEFAULT_IMAGES
 from manifesto.render import render, render_to_yaml
-from manifesto.render.devpod import render_dev_pod
 from manifesto.overrides import load_routing_profile
-from manifesto.spec import EppSpec, load_spec
+from manifesto.spec import EppSpec, RuntimeSpec, load_spec
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,8 +82,7 @@ def test_stateless_single_rank_render_omits_filesystem_and_distributed_baggage()
     assert container["volumeMounts"] == [{"name": "dshm", "mountPath": "/dev/shm"}]
     assert env_names == {"HF_TOKEN", "TQDM_DISABLE", "VLLM_NO_USAGE_STATS"}
     assert "LOG_DIR=" not in script
-    assert "MANIFESTO_VLLM_DEV_VENV" not in script
-    assert "vllm-dev" not in script
+    assert "MANIFESTO_VLLM_ENV" not in script
     assert "for R in" not in script
     assert "DP_SIZE" not in script
     assert "CACHE_DIR" not in script
@@ -103,13 +101,37 @@ def test_stateless_single_rank_render_omits_filesystem_and_distributed_baggage()
     assert "terminationGracePeriodSeconds" not in pod_spec
 
 
-def test_dev_mode_requires_a_configured_filesystem():
+def test_vllm_env_requires_an_absolute_mounted_path():
     cluster = _stateless_cluster()
     spec = load_spec(ROOT / "models" / "qwen" / "qwen3-0.6b.yaml", cluster)
-    spec.runtime.dev = True
+    spec.runtime.vllm_env = "relative/worktree"
 
-    with pytest.raises(ValueError, match="development mode requires"):
+    with pytest.raises(ValueError, match="must be an absolute path"):
         render(spec, user="tester", cluster=cluster)
+
+    spec.runtime.vllm_env = "/unmounted/worktree"
+    with pytest.raises(ValueError, match="not covered by a model pod volume mount"):
+        render(spec, user="tester", cluster=cluster)
+
+    spec.runtime.vllm_env = "/mnt/shared/../unmounted/worktree"
+    with pytest.raises(ValueError, match="not covered by a model pod volume mount"):
+        render(spec, user="tester", cluster=CLUSTER)
+
+
+def test_cluster_schema_rejects_removed_dev_configuration(tmp_path):
+    data = yaml.safe_load((ROOT / "clusters" / "example-gb200.yaml").read_text())
+    data["dev"] = {"venv": "/mnt/shared/vllm-venv"}
+    path = tmp_path / "cluster.yaml"
+    path.write_text(yaml.safe_dump(data))
+
+    with pytest.raises(ValueError, match="dev"):
+        load_cluster(path)
+
+
+@pytest.mark.parametrize("removed", [{"dev": True}, {"dev_venv": "/custom/venv"}])
+def test_runtime_schema_rejects_removed_dev_configuration(removed):
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        RuntimeSpec.model_validate(removed)
 
 
 def test_nixl_roles_advertise_their_pod_ip():
@@ -763,97 +785,6 @@ def test_example_h200_cluster_uses_generic_cache_and_rdma_settings():
     assert "--max-cudagraph-capture-size" not in script
     assert container["resources"]["requests"]["example.com/rdma"] == "1"
     assert container["resources"]["limits"]["example.com/rdma"] == "1"
-
-
-def test_dev_pod_derives_storage_and_paths_from_cluster_profile():
-    pod = render_dev_pod(CLUSTER, "Tester.Name")
-    container = pod["spec"]["containers"][0]
-    env = {item["name"]: item["value"] for item in container["env"] if "value" in item}
-    volumes = {volume["name"]: volume for volume in pod["spec"]["volumes"]}
-
-    assert pod["metadata"]["name"] == "tester-name-vllm-dev"
-    assert container["image"] == "quay.io/tms/vllm-dev:latest"
-    assert volumes["shared-storage"]["persistentVolumeClaim"]["claimName"] == "example-shared-cache"
-    assert container["workingDir"] == "/tmp"
-    assert env["HF_HOME"] == "/mnt/shared/hf_cache"
-    assert env["CCACHE_DIR"] == "/mnt/shared/tester-name/ccache"
-    assert env["UV_CACHE_DIR"] == "/mnt/shared/tester-name/dev-caches/uv"
-
-    h200_pod = render_dev_pod(EXAMPLE_H200, "tester")
-    h200_volumes = {volume["name"]: volume for volume in h200_pod["spec"]["volumes"]}
-    h200_env = {
-        item["name"]: item["value"] for item in h200_pod["spec"]["containers"][0]["env"] if "value" in item
-    }
-    assert h200_volumes["hf-cache"]["hostPath"]["path"] == "/var/cache/manifesto/huggingface"
-    assert h200_env["HF_HOME"] == "/var/cache/huggingface"
-
-
-def test_dev_pod_image_can_be_overridden_for_cluster_architecture():
-    pod = render_dev_pod(
-        CLUSTER,
-        "tester-name",
-        image="vllm/vllm-openai:kimi-k3",
-    )
-
-    assert pod["spec"]["containers"][0]["image"] == "vllm/vllm-openai:kimi-k3"
-
-
-def test_dev_pod_resources_can_run_builds_without_reserving_a_gpu():
-    pod = render_dev_pod(CLUSTER, "tester-name", cpu="16", memory="64Gi", gpus=0)
-    resources = pod["spec"]["containers"][0]["resources"]
-
-    assert resources["requests"] == {"cpu": "16", "memory": "64Gi"}
-    assert resources["limits"] == {"cpu": "16", "memory": "64Gi"}
-
-
-def test_dev_pod_uses_cluster_dns_configuration():
-    cluster = CLUSTER.model_copy(deep=True)
-    cluster.pod_defaults.dns_policy = "None"
-    cluster.pod_defaults.dns_config = {"nameservers": ["192.0.2.53"]}
-
-    pod = render_dev_pod(cluster, "tester")
-
-    assert pod["spec"]["dnsPolicy"] == "None"
-    assert pod["spec"]["dnsConfig"] == {"nameservers": ["192.0.2.53"]}
-
-
-def test_openshift_dev_pod_uses_non_root_security_and_cluster_placement():
-    cluster = CLUSTER.model_copy(deep=True)
-    cluster.platform = "openshift"
-    cluster.pod_defaults.affinity = {
-        "nodeAffinity": {
-            "requiredDuringSchedulingIgnoredDuringExecution": {
-                "nodeSelectorTerms": [
-                    {
-                        "matchExpressions": [
-                            {"key": "example.com/accelerator", "operator": "Exists"}
-                        ]
-                    }
-                ]
-            }
-        }
-    }
-    cluster.pod_defaults.container_security_context = {
-        "allowPrivilegeEscalation": False,
-        "capabilities": {"drop": ["ALL"]},
-    }
-
-    pod = render_dev_pod(cluster, "tester")
-    container = pod["spec"]["containers"][0]
-
-    assert pod["spec"]["securityContext"] == {
-        "fsGroup": 2000,
-        "fsGroupChangePolicy": "OnRootMismatch",
-    }
-    assert container["securityContext"] == {
-        "allowPrivilegeEscalation": False,
-        "capabilities": {"drop": ["ALL"]},
-        "runAsGroup": 0,
-        "runAsNonRoot": True,
-        "runAsUser": 2000,
-        "seccompProfile": {"type": "RuntimeDefault"},
-    }
-    assert pod["spec"]["affinity"] == cluster.pod_defaults.affinity
 
 
 def test_lws_uses_cluster_routing_sidecar_image():

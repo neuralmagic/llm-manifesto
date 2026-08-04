@@ -34,12 +34,6 @@ from .workflow import (
     config_home,
     delete_file,
     deploy,
-    dev_build,
-    dev_build_log,
-    dev_init,
-    dev_shell,
-    dev_start,
-    dev_stop,
     diff_file,
     kubectl_limits,
     load_cluster_with_overrides,
@@ -55,11 +49,6 @@ from .workflow import (
     resolve_user,
     servers,
     stop,
-    VLLM_BUILD_JOBS,
-    FLASHINFER_VERSION,
-    NCCL_VERSION,
-    VLLM_DEV_BRANCH,
-    VLLM_DEV_REMOTE,
 )
 
 
@@ -113,12 +102,10 @@ def _add_render_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--namespace")
     parser.add_argument("--user")
     parser.add_argument("--routing-profile")
-    parser.add_argument("--dev", action="store_true")
+    parser.add_argument("--vllm-env")
     parser.add_argument("--user-root")
     parser.add_argument("--log-root")
     parser.add_argument("--cache-root")
-    parser.add_argument("--dev-venv")
-    parser.add_argument("--dev-source")
     parser.add_argument("--pre-launch", action="append", default=[])
 
 
@@ -145,18 +132,6 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--user-root")
     parser.add_argument("--log-root")
     parser.add_argument("--cache-root")
-    parser.add_argument("--dev-venv")
-    parser.add_argument("--dev-source")
-
-
-def _add_dev_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--cluster")
-    _add_gpu_arg(parser)
-    parser.add_argument("--namespace")
-    parser.add_argument("--user")
-    parser.add_argument("--user-root")
-    parser.add_argument("--dev-venv")
-    parser.add_argument("--dev-source")
 
 
 def _add_ready_args(parser: argparse.ArgumentParser) -> None:
@@ -422,54 +397,6 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_render_args(explain_parser)
     explain_parser.set_defaults(func=_explain)
 
-    dev_parser = sub.add_parser("dev", help="manage the persistent vLLM development environment")
-    dev_sub = dev_parser.add_subparsers(dest="dev_command", required=True)
-
-    dev_start_parser = dev_sub.add_parser("start", help="start and initialize the development environment")
-    _add_dev_args(dev_start_parser)
-    dev_start_parser.add_argument("--image", help="override the cluster dev image")
-    dev_start_parser.add_argument("--dev-cpu", help="override the dev pod CPU request")
-    dev_start_parser.add_argument("--dev-memory", help="override the dev pod memory request")
-    dev_start_parser.add_argument("--dev-gpus", type=int, help="override the dev pod GPU request")
-    dev_start_parser.add_argument("--remote", default=VLLM_DEV_REMOTE)
-    dev_start_parser.add_argument("--branch", default=VLLM_DEV_BRANCH)
-    dev_start_parser.set_defaults(func=dev_start)
-
-    dev_init_parser = dev_sub.add_parser("init", help="initialize the vLLM checkout and virtual environment")
-    _add_dev_args(dev_init_parser)
-    dev_init_parser.add_argument("--remote", default=VLLM_DEV_REMOTE)
-    dev_init_parser.add_argument("--branch", default=VLLM_DEV_BRANCH)
-    dev_init_parser.set_defaults(func=dev_init)
-
-    dev_shell_parser = dev_sub.add_parser("shell", help="open a shell in the development pod")
-    _add_dev_args(dev_shell_parser)
-    dev_shell_parser.set_defaults(func=dev_shell)
-
-    dev_build_parser = dev_sub.add_parser("build", help="install vLLM in the development pod")
-    _add_dev_args(dev_build_parser)
-    dev_build_parser.add_argument("--remote", default=VLLM_DEV_REMOTE)
-    dev_build_parser.add_argument("--branch", default=VLLM_DEV_BRANCH)
-    dev_build_parser.add_argument("--jobs", type=int, default=VLLM_BUILD_JOBS)
-    dev_build_parser.add_argument(
-        "--source-build",
-        action="store_true",
-        help=(
-            "compile the CUDA extensions instead of using the precompiled wheel "
-            "(needed only for C/C++/CUDA changes; takes tens of minutes)"
-        ),
-    )
-    dev_build_parser.add_argument("--flashinfer-version", default=FLASHINFER_VERSION)
-    dev_build_parser.add_argument("--nccl-version", default=NCCL_VERSION)
-    dev_build_parser.set_defaults(func=dev_build)
-
-    dev_log_parser = dev_sub.add_parser("build-log", help="follow the development build log")
-    _add_dev_args(dev_log_parser)
-    dev_log_parser.set_defaults(func=dev_build_log)
-
-    dev_stop_parser = dev_sub.add_parser("stop", help="delete the development pod")
-    _add_dev_args(dev_stop_parser)
-    dev_stop_parser.set_defaults(func=dev_stop)
-
     file_parser = sub.add_parser("file", help="manage the saved workflow manifest")
     file_sub = file_parser.add_subparsers(dest="file_command", required=True)
 
@@ -532,9 +459,8 @@ def _build_parser() -> argparse.ArgumentParser:
     stop_parser.add_argument("--namespace")
     stop_parser.add_argument("--user")
     # Retain legacy render flags as accepted no-ops now that stop discovers live state.
-    for legacy_flag in ("--cluster", "--user-root", "--log-root", "--cache-root", "--dev-venv", "--dev-source"):
+    for legacy_flag in ("--cluster", "--user-root", "--log-root", "--cache-root"):
         stop_parser.add_argument(legacy_flag, help=argparse.SUPPRESS)
-    stop_parser.add_argument("--dev", action="store_true", help=argparse.SUPPRESS)
     stop_parser.add_argument("--pre-launch", action="append", default=[], help=argparse.SUPPRESS)
     stop_parser.add_argument("--now", action="store_true")
     stop_parser.set_defaults(func=stop)
@@ -557,8 +483,7 @@ def _build_parser() -> argparse.ArgumentParser:
     e2e_parser.add_argument("--image", default=E2E_IMAGE)
     e2e_parser.add_argument("--timeout", type=int, default=300)
     e2e_parser.add_argument("--gateway-timeout", type=int, default=120)
-    e2e_parser.add_argument("--remote", default=VLLM_DEV_REMOTE)
-    e2e_parser.add_argument("--branch", default=VLLM_DEV_BRANCH)
+    e2e_parser.add_argument("--vllm-env")
     e2e_parser.add_argument("--keep-namespace", action="store_true")
     e2e_parser.set_defaults(func=e2e)
 
@@ -794,7 +719,7 @@ def _completion_values(
             None,
         )
         return _completion_catalog(catalog, prefix) if catalog else []
-    if action.dest in {"file", "output"}:
+    if action.dest in {"file", "output", "vllm_env"}:
         return _completion_files(prefix, yaml_only=action.dest == "file")
     return []
 
