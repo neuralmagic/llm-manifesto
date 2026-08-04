@@ -652,11 +652,6 @@ Manifesto fails before launching vLLM if the worktree or `.venv/bin/activate` is
 missing. Set the same pointer declaratively with `runtime.vllm_env` in a model
 spec. Without either setting, the deployment uses vLLM from the model image.
 
-For the full cluster bootstrap and per-agent worktree workflow, see
-[vLLM Development with OpenShell, vllm-envs, and Manifesto](docs/vllm-development-workflow.md).
-The missing build-plane API is scoped separately in
-[vLLM Development Services](docs/vllm-development-services.md).
-
 ## Monitoring
 
 The `monitoring/` directory contains namespace-scoped Prometheus and Grafana
