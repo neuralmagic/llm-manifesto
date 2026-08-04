@@ -4,8 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from manifesto.cluster import AcceleratorConfig, load_cluster
-from manifesto.render.devpod import render_dev_pod
+from manifesto.cluster import load_cluster
 from manifesto.spec import load_spec
 
 
@@ -35,23 +34,3 @@ def test_deployments_inherit_default_and_can_override_accelerator():
 def test_unknown_accelerator_is_rejected():
     with pytest.raises(ValueError, match="unknown accelerator"):
         CLUSTER.accelerators.get("quantum-gpu")
-
-
-def test_dev_pod_uses_selected_accelerator_contract():
-    accelerator = AcceleratorConfig(
-        resource_name="example.com/accelerator",
-        presence_label="example.com/accelerator.present",
-        gpu_arch="test-arch",
-        torch_cuda_arch_list="12.3",
-    )
-    pod = render_dev_pod(CLUSTER, "tester", accelerator)
-    container = pod["spec"]["containers"][0]
-    env = {item["name"]: item["value"] for item in container["env"] if "value" in item}
-    match_expression = pod["spec"]["affinity"]["nodeAffinity"][
-        "requiredDuringSchedulingIgnoredDuringExecution"
-    ]["nodeSelectorTerms"][0]["matchExpressions"][0]
-
-    assert container["resources"]["requests"]["example.com/accelerator"] == "1"
-    assert container["resources"]["limits"]["example.com/accelerator"] == "1"
-    assert match_expression["key"] == "example.com/accelerator.present"
-    assert env["TORCH_CUDA_ARCH_LIST"] == "12.3"

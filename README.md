@@ -18,7 +18,7 @@ package and CLI command name.
 Manifesto takes two YAML inputs:
 
 - a **model spec**: model image, topology, roles, parallelism, routing, vLLM args
-- a **cluster profile**: GPU shape, storage paths, dev venv paths, fabric env, llm-d images
+- a **cluster profile**: GPU shape, storage paths, fabric env, llm-d images
 
 It emits raw Kubernetes manifests:
 
@@ -69,7 +69,7 @@ uv run manifesto render manifest models/qwen/aggregated.yaml \
 Render to a file, edit it, diff it, then apply it:
 
 ```bash
-manifesto render file models/deepseek-v4/1P-EP8-1D-EP8.yaml --dev
+manifesto render file models/deepseek-v4/1P-EP8-1D-EP8.yaml
 $EDITOR /tmp/$USER-manifesto.yaml
 manifesto file diff
 manifesto file apply
@@ -78,7 +78,7 @@ manifesto file apply
 Deploy directly:
 
 ```bash
-manifesto deploy models/deepseek-v4/1P-EP8-1D-EP8.yaml --dev
+manifesto deploy models/deepseek-v4/1P-EP8-1D-EP8.yaml
 manifesto ready models/deepseek-v4/1P-EP8-1D-EP8.yaml
 ```
 
@@ -358,11 +358,11 @@ They deliberately omit real network, storage, scheduling, and provider details.
 Put usable profiles in the private user catalog described above; `clusters/*.yaml`
 is ignored by git except for files named `example-*.yaml`.
 
-The stateless example intentionally declares no cache, logging, or development
-filesystem. Its model pods omit persistent cache env, storage mounts, and the
-log tee wrapper; libraries use container-local defaults and logs stream to
-stdout. Development mode fails early until source and venv filesystems are
-configured.
+The stateless example intentionally declares no cache or logging filesystem. Its
+model pods omit persistent cache env, storage mounts, and the log tee wrapper;
+libraries use container-local defaults and logs stream to stdout. An external
+vllm-envs worktree cannot be selected unless its absolute path is covered by a
+model-pod volume mount.
 
 Manifesto also omits Kubernetes fields whose defaults are sufficient. Set
 `pod_defaults.image_pull_policy`, `termination_grace_period_seconds`,
@@ -380,7 +380,7 @@ spec:
 - optional namespace bootstrap configuration for shared PVCs
 - pod annotations, scheduling constraints, extra devices, and security context
 - RDMA extended-resource requests and OpenShift SCC authorization
-- user, log, cache, and dev venv path templates
+- user, log, and cache path templates
 - llm-d release
 - UCX/NCCL/NVSHMEM/IMEX fabric env profiles
 
@@ -519,7 +519,7 @@ The file workflow is the preferred path when you want to share or tweak exactly
 what will be deployed:
 
 ```bash
-manifesto render file models/deepseek-v4/1P-EP8-1D-EP8.yaml --dev
+manifesto render file models/deepseek-v4/1P-EP8-1D-EP8.yaml
 $EDITOR /tmp/$USER-manifesto.yaml
 manifesto file diff
 manifesto file apply
@@ -602,25 +602,29 @@ Examples:
 manifesto deploy models/qwen/aggregated.yaml
 manifesto ready models/qwen/aggregated.yaml
 manifesto test e2e models/qwen/qwen3-0.6b.yaml --cluster my-cluster
-manifesto deploy models/deepseek-v4/1P-EP8-1D-EP8.yaml --dev
+manifesto deploy models/deepseek-v4/1P-EP8-1D-EP8.yaml \
+  --vllm-env /mnt/shared/$USER/vllm-envs/feature
 manifesto deploy routing models/deepseek-v4/1P-EP8-1D-EP8.yaml
 manifesto stop
 ```
 
-`manifesto test e2e` owns the complete test lifecycle. It creates a fresh namespace,
-replaces profile storage with `emptyDir` volumes so no PVC is created or
-referenced, deploys and initializes the vLLM dev environment, and removes the
-dev pod to release its GPU. It then deploys the selected model, waits for it to
-become ready, and creates an unprivileged Job that calls `/v1/models` followed
-by a real `/v1/completions` request. The Job targets the generated Gateway when
-routing is enabled and the model Service otherwise.
+`manifesto test e2e` owns the complete test lifecycle. By default it creates a
+fresh namespace, replaces profile storage with `emptyDir` volumes, deploys the
+vLLM bundled in the model image, waits for it to become ready, and creates an
+unprivileged Job that calls `/v1/models` followed by a real `/v1/completions`
+request. The Job targets the generated Gateway when routing is enabled and the
+model Service otherwise.
+
+Pass `--vllm-env /absolute/worktree/path` to test an existing vllm-envs
+worktree instead. That mode preserves the cluster profile's normal storage so
+the worktree remains visible; its volume references must be usable in the fresh
+test namespace. Manifesto never creates, synchronizes, or modifies the worktree.
 
 The namespace is deleted at the end, including on failure. Pass `--namespace`
 to choose its name (the command refuses an existing namespace),
 `--keep-namespace` to retain all test resources for inspection, `--timeout` to
 change the inference deadline, or `--image` to use a mirrored Python image.
-`HF_TOKEN` and a cluster profile are required, as with the normal dev and
-deployment workflows.
+`HF_TOKEN` and a cluster profile are required, as with normal deployments.
 
 Every rendered object is scoped by the instance identity:
 
@@ -632,38 +636,21 @@ Names, labels, selectors, and cache paths all derive from that identity so
 multiple users can share the same namespace without cross-routing through each
 other's pods.
 
-## Dev vLLM Workflow
+## External vLLM Environments
 
-The dev workflow creates a persistent dev pod, clones vLLM into the
-cluster-configured source path, creates its shared venv, and mounts that venv
-into model-server pods.
-
-```bash
-manifesto dev start
-manifesto dev shell
-manifesto dev build
-manifesto dev build-log
-manifesto dev stop
-```
-
-`manifesto dev start` is idempotent. It preserves an existing checkout and venv;
-use `manifesto dev init` to rerun only the initialization step.
-`manifesto dev build` performs an editable source build of the selected branch;
-it does not depend on a precompiled wheel existing for the branch tip.
-
-Deploy a model with the dev venv:
+Use [vllm-envs](https://github.com/neuralmagic/vllm-envs) to create, synchronize,
+build, and remove development environments. Manifesto only points model pods at
+an existing vLLM worktree whose `.venv` has already been initialized:
 
 ```bash
-manifesto deploy models/deepseek-v4/1P-EP8-1D-EP8.yaml --dev
+manifesto deploy models/deepseek-v4/1P-EP8-1D-EP8.yaml \
+  --vllm-env /mnt/shared/$USER/vllm-envs/feature
 ```
 
-The venv and source paths come from the cluster profile and can be overridden at
-render time:
-
-```bash
-manifesto deploy models/deepseek-v4/1P-EP8-1D-EP8.yaml --dev \
-  --dev-venv /mnt/shared/$USER/custom-vllm-venv
-```
+The path must be absolute and covered by a volume mount in every model pod.
+Manifesto fails before launching vLLM if the worktree or `.venv/bin/activate` is
+missing. Set the same pointer declaratively with `runtime.vllm_env` in a model
+spec. Without either setting, the deployment uses vLLM from the model image.
 
 ## Monitoring
 
@@ -687,7 +674,7 @@ MANIFESTO_CLUSTER_MAP=my-context=clusters/example-h200.yaml
 MANIFESTO_NAMESPACE=workload-ns  # optional, defaults to current kube namespace
 ```
 
-`manifesto deploy`, `manifesto file apply`, and `manifesto dev start`
+`manifesto deploy` and `manifesto file apply`
 create or update the namespace's `hf-secret` from `HF_TOKEN` before launching
 pods. The token is sent to `kubectl apply` over stdin and is not included in
 rendered workload files. Pure `manifesto render` commands remain side-effect

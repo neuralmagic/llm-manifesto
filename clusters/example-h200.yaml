@@ -35,10 +35,6 @@ paths:
   user_root: /var/cache/manifesto/{user}
   cache_root: /var/cache/manifesto/{user}/jit-cache/{gpu_arch}/{cuda}/{cache_key}/{release}
 
-dev:
-  venv: /var/cache/manifesto/{user}/vllm-venv
-  source: /var/cache/manifesto/{user}/vllm-dev
-
 fabric:
   ucx_net_devices: ""
   default_profile: standard

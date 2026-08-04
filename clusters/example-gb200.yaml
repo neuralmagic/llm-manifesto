@@ -42,10 +42,6 @@ paths:
   user_root: /mnt/shared/{user}
   cache_root: /mnt/shared/{user}/jit-cache/{gpu_arch}/{cuda}/{cache_key}/{release}
 
-dev:
-  venv: /mnt/shared/{user}/vllm-venv
-  source: /mnt/shared/{user}/vllm-dev
-
 fabric:
   # Leave device selection to the runtime in this synthetic profile.
   ucx_net_devices: ""

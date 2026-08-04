@@ -206,8 +206,9 @@ class ModelSpec(BaseModel):
 
 
 class RuntimeSpec(BaseModel):
-    dev: bool = False
-    dev_venv: str | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    vllm_env: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     pre_launch: list[str] = Field(default_factory=list)
     sidecars: list[str] = Field(default_factory=lambda: ["dcgm-exporter", "node-exporter"])
