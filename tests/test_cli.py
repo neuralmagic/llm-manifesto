@@ -20,6 +20,7 @@ from manifesto.workflow import (
     config_home,
     resolve_cluster,
     resolve_model,
+    resolve_namespace,
 )
 
 
@@ -125,6 +126,28 @@ def test_cluster_named_for_current_context_is_selected(monkeypatch, tmp_path):
     )
 
     assert resolve_cluster() == str(cluster)
+
+
+def test_explicit_context_selects_its_namespace_and_cluster(monkeypatch, tmp_path):
+    user_config = tmp_path / "manifesto-config"
+    cluster = user_config / "clusters" / "remote-context.yaml"
+    cluster.parent.mkdir(parents=True)
+    cluster.write_text("name: remote-context\n")
+    monkeypatch.setenv("MANIFESTO_CONFIG_HOME", str(user_config))
+    monkeypatch.delenv("MANIFESTO_CLUSTER", raising=False)
+    monkeypatch.delenv("MANIFESTO_CLUSTER_MAP", raising=False)
+    monkeypatch.delenv("MANIFESTO_NAMESPACE", raising=False)
+
+    def fake_capture(cmd, **_):
+        assert cmd[:3] == ["kubectl", "--context", "remote-context"]
+        if "jsonpath={..namespace}" in cmd:
+            return "workload-ns\n"
+        return "openshift\n"
+
+    monkeypatch.setattr(workflow, "capture", fake_capture)
+
+    assert resolve_namespace(context="remote-context") == "workload-ns"
+    assert resolve_cluster(context="remote-context") == str(cluster)
 
 
 def test_render_accepts_user_catalog_names(monkeypatch, tmp_path, capsys):
@@ -606,6 +629,62 @@ def test_render_cli_pre_launch_hook(monkeypatch, capsys):
     assert "echo cli-hook" in capsys.readouterr().out
 
 
+def test_render_cli_overrides_idle_shutdown(capsys):
+    rc = main(
+        [
+            "render",
+            "manifest",
+            str(STANDALONE_MODEL),
+            "--cluster",
+            str(CLUSTER),
+            "--namespace",
+            "workload-ns",
+            "--user",
+            "tester",
+            "--idle-timeout",
+            "2m",
+        ]
+    )
+
+    assert rc == 0
+    rendered = capsys.readouterr().out
+    assert "--idle-timeout 2m" in rendered
+    documents = [doc for doc in yaml.safe_load_all(rendered) if doc]
+    controller = next(
+        doc
+        for doc in documents
+        if doc["kind"] == "Deployment"
+        and doc["metadata"]["name"].endswith("idle-shutdown")
+    )
+    env = {
+        item["name"]: item
+        for item in controller["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert env["TIMEOUT_SECONDS"]["value"] == "120"
+
+
+def test_render_cli_can_disable_idle_shutdown(capsys):
+    rc = main(
+        [
+            "render",
+            "manifest",
+            str(STANDALONE_MODEL),
+            "--cluster",
+            str(CLUSTER),
+            "--namespace",
+            "workload-ns",
+            "--user",
+            "tester",
+            "--no-idle-shutdown",
+        ]
+    )
+
+    assert rc == 0
+    rendered = capsys.readouterr().out
+    assert "--no-idle-shutdown" in rendered
+    assert "app.kubernetes.io/component: idle-shutdown" not in rendered
+
+
 def test_render_file_uses_env_defaults(tmp_path, monkeypatch, capsys):
     output = tmp_path / "manifest.yaml"
     monkeypatch.setenv("MANIFESTO_CLUSTER", str(CLUSTER))
@@ -648,6 +727,41 @@ def test_deploy_pipes_rendered_manifest_to_kubectl(monkeypatch):
     assert "kind: LeaderWorkerSet" in calls[1][1]
     assert "hf_read_test" not in calls[1][1]
     assert "--vllm-env /mnt/shared/tester/vllm-envs/feature" in calls[1][1]
+
+
+def test_deploy_honors_context_and_idle_timeout(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, *, input_text=None):
+        calls.append((cmd, input_text))
+        return 0
+
+    monkeypatch.setenv("MANIFESTO_CLUSTER", str(CLUSTER))
+    monkeypatch.setenv("HF_TOKEN", "hf_read_test")
+    monkeypatch.setattr(workflow, "run", fake_run)
+
+    rc = main(
+        [
+            "deploy",
+            str(STANDALONE_MODEL),
+            "--context",
+            "remote-context",
+            "--namespace",
+            "workload-ns",
+            "--user",
+            "tester",
+            "--idle-timeout",
+            "2m",
+        ]
+    )
+
+    assert rc == 0
+    assert [call[0] for call in calls] == [
+        ["kubectl", "--context", "remote-context", "-n", "workload-ns", "apply", "-f", "-"],
+        ["kubectl", "--context", "remote-context", "-n", "workload-ns", "apply", "-f", "-"],
+    ]
+    assert "--idle-timeout 2m" in calls[1][1]
+    assert "value: '120'" in calls[1][1]
 
 
 def test_deploy_requires_hf_token_before_applying(monkeypatch, capsys):
@@ -1074,7 +1188,7 @@ def test_completion_candidates_follow_parser_and_catalogs(capsys):
     assert capsys.readouterr().out.splitlines() == ["--vllm-env"]
 
     assert main(["__complete", "render", "manifest", "--c"]) == 0
-    assert capsys.readouterr().out.splitlines() == ["--cache-root", "--cluster"]
+    assert capsys.readouterr().out.splitlines() == ["--cache-root", "--cluster", "--context"]
 
     assert main(["__complete", "completion", ""]) == 0
     assert capsys.readouterr().out.splitlines()[-3:] == ["bash", "fish", "zsh"]

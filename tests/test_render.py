@@ -1,8 +1,11 @@
 """Structural tests for rendered Kubernetes objects and YAML serialization."""
 
+import json
 import os
 import subprocess
+import urllib.request
 from copy import deepcopy
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -10,8 +13,9 @@ import yaml
 
 from manifesto.cluster import load_cluster
 from manifesto.images import DEFAULT_IMAGES
-from manifesto.render import render, render_to_yaml
 from manifesto.overrides import load_routing_profile
+from manifesto.render import render, render_to_yaml
+from manifesto.render.idle_shutdown import IDLE_SHUTDOWN_SCRIPT
 from manifesto.spec import EppSpec, RuntimeSpec, load_spec
 
 
@@ -49,6 +53,20 @@ def _find(objects: list[dict], kind: str, name_suffix: str | None = None) -> dic
     raise AssertionError(f"missing {kind} {name_suffix or ''}")
 
 
+def _idle_shutdown_functions(monkeypatch) -> dict:
+    monkeypatch.setenv("NAMESPACE", "test")
+    monkeypatch.setenv("POD_SELECTOR", "app=test")
+    monkeypatch.setenv("TARGETS", "{}")
+    monkeypatch.setenv("EXPECTED_TARGETS", "0")
+    monkeypatch.setenv("TIMEOUT_SECONDS", "2700")
+    monkeypatch.setenv("WORKLOADS", "[]")
+    monkeypatch.setattr("ssl.create_default_context", lambda **_kwargs: None)
+    definitions = IDLE_SHUTDOWN_SCRIPT.split("last_activity = time.monotonic()", 1)[0]
+    namespace: dict = {}
+    exec(compile(definitions, "idle_shutdown.py", "exec"), namespace)
+    return namespace
+
+
 def test_rendered_yaml_parses():
     objects = _objects(DEEPSEEK)
     parsed = list(yaml.safe_load_all(render_to_yaml(objects)))
@@ -69,7 +87,15 @@ def test_stateless_single_rank_render_omits_filesystem_and_distributed_baggage()
     spec = load_spec(ROOT / "models" / "qwen" / "qwen3-0.6b.yaml", cluster)
     objects = render(spec, user="tester", cluster=cluster)
 
-    assert [obj["kind"] for obj in objects] == ["Deployment", "Service"]
+    assert [obj["kind"] for obj in objects] == [
+        "Deployment",
+        "Service",
+        "ServiceAccount",
+        "Role",
+        "RoleBinding",
+        "ConfigMap",
+        "Deployment",
+    ]
     deployment = _find(objects, "Deployment", "decode")
     pod_spec = deployment["spec"]["template"]["spec"]
     container = pod_spec["containers"][0]
@@ -116,6 +142,126 @@ def test_vllm_env_requires_an_absolute_mounted_path():
     spec.runtime.vllm_env = "/mnt/shared/../unmounted/worktree"
     with pytest.raises(ValueError, match="not covered by a model pod volume mount"):
         render(spec, user="tester", cluster=CLUSTER)
+
+
+def test_idle_shutdown_is_enabled_by_default_for_45_minutes():
+    spec = load_spec(ROOT / "models" / DEEPSEEK, CLUSTER)
+    objects = render(spec, user="tester", cluster=CLUSTER)
+    controller = _find(objects, "Deployment", "idle-shutdown")
+    container = controller["spec"]["template"]["spec"]["containers"][0]
+    env = {item["name"]: item for item in container["env"]}
+    workloads = json.loads(env["WORKLOADS"]["value"])
+    targets = json.loads(env["TARGETS"]["value"])
+
+    assert controller["spec"]["replicas"] == 1
+    assert env["TIMEOUT_SECONDS"]["value"] == "2700"
+    assert env["EXPECTED_TARGETS"]["value"] == "16"
+    assert workloads[-1]["name"].endswith("idle-shutdown")
+    assert all(workload["replicas"] == 1 for workload in workloads)
+    assert {workload["name"] for workload in workloads[:-1]} == {
+        "tester-vllm-ep8-decode",
+        "tester-vllm-ep8-prefill",
+        "tester-wide-ep-1p-ep8-1d-ep8-infpool-epp",
+    }
+    assert targets["decode"]["worker_indices"] is None
+    assert targets["prefill"]["worker_indices"] is None
+    role = _find(objects, "Role", "idle-shutdown-rbac")
+    assert role["rules"][-1] == {
+        "apiGroups": ["leaderworkerset.x-k8s.io"],
+        "resources": ["leaderworkersets"],
+        "resourceNames": ["tester-vllm-ep8-decode", "tester-vllm-ep8-prefill"],
+        "verbs": ["get", "patch"],
+    }
+    compile(
+        _find(objects, "ConfigMap", "idle-shutdown")["data"]["idle_shutdown.py"],
+        "idle_shutdown.py",
+        "exec",
+    )
+
+
+def test_idle_shutdown_reloads_service_account_token(monkeypatch, tmp_path):
+    namespace = _idle_shutdown_functions(monkeypatch)
+    token_path = tmp_path / "token"
+    namespace["TOKEN_PATH"] = str(token_path)
+    authorizations = []
+
+    def urlopen(request, **_kwargs):
+        authorizations.append(request.get_header("Authorization"))
+        return BytesIO(b"{}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    token_path.write_text("first-token")
+    namespace["api_request"]("/api/v1/pods")
+    token_path.write_text("rotated-token")
+    namespace["api_request"]("/api/v1/pods")
+
+    assert authorizations == ["Bearer first-token", "Bearer rotated-token"]
+
+
+def test_idle_shutdown_rolls_back_successful_scale_patches(monkeypatch):
+    namespace = _idle_shutdown_functions(monkeypatch)
+    namespace["WORKLOADS"] = [
+        {"name": "first", "path": "/first", "replicas": 2},
+        {"name": "second", "path": "/second", "replicas": 3},
+        {"name": "third", "path": "/third", "replicas": 4},
+    ]
+    patches = []
+
+    def api_request(path, *, method="GET", body=None):
+        patches.append((path, method, body))
+        if path == "/third":
+            raise OSError("transient API failure")
+
+    namespace["api_request"] = api_request
+
+    with pytest.raises(OSError, match="transient API failure"):
+        namespace["scale_to_zero"]()
+
+    assert patches == [
+        ("/first", "PATCH", {"spec": {"replicas": 0}}),
+        ("/second", "PATCH", {"spec": {"replicas": 0}}),
+        ("/third", "PATCH", {"spec": {"replicas": 0}}),
+        ("/second", "PATCH", {"spec": {"replicas": 3}}),
+        ("/first", "PATCH", {"spec": {"replicas": 2}}),
+    ]
+
+
+def test_idle_shutdown_can_be_disabled_or_given_a_custom_timeout():
+    spec = load_spec(ROOT / "models" / "qwen" / "qwen3-0.6b.yaml", _stateless_cluster())
+    spec.runtime.idle_shutdown.enabled = False
+    objects = render(spec, user="tester", cluster=_stateless_cluster())
+
+    assert not any(
+        obj["metadata"].get("labels", {}).get("app.kubernetes.io/component")
+        == "idle-shutdown"
+        for obj in objects
+    )
+
+    spec.runtime.idle_shutdown.enabled = True
+    spec.runtime.idle_shutdown.timeout_minutes = 12
+    objects = render(spec, user="tester", cluster=_stateless_cluster())
+    controller = _find(objects, "Deployment", "idle-shutdown")
+    env = {
+        item["name"]: item
+        for item in controller["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+
+    assert env["TIMEOUT_SECONDS"]["value"] == "720"
+
+
+def test_idle_shutdown_only_scrapes_cross_node_tp_api_servers():
+    spec = load_spec(ROOT / "models" / "kimi-k3" / "aggregated-tp16-ep16.yaml", CLUSTER)
+    objects = render(spec, user="tester", cluster=CLUSTER)
+    controller = _find(objects, "Deployment", "idle-shutdown")
+    env = {
+        item["name"]: item
+        for item in controller["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    targets = json.loads(env["TARGETS"]["value"])
+
+    assert targets["decode"]["worker_indices"] == ["0"]
+    assert env["EXPECTED_TARGETS"]["value"] == "1"
 
 
 def test_cluster_schema_rejects_removed_dev_configuration(tmp_path):

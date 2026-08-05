@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -95,9 +96,22 @@ def _add_gpu_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--gpu", "--accelerator", dest="accelerator")
 
 
+def _duration_minutes(value: str) -> int:
+    match = re.fullmatch(r"([1-9][0-9]*)([mh]?)", value.strip().lower())
+    if not match:
+        raise argparse.ArgumentTypeError("use a positive duration such as 15m or 2h")
+    amount = int(match.group(1))
+    return amount * 60 if match.group(2) == "h" else amount
+
+
+def _add_context_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--context", help="kubectl context to use")
+
+
 def _add_render_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("spec")
     _add_gpu_arg(parser)
+    _add_context_arg(parser)
     parser.add_argument("--cluster")
     parser.add_argument("--namespace")
     parser.add_argument("--user")
@@ -107,6 +121,19 @@ def _add_render_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--log-root")
     parser.add_argument("--cache-root")
     parser.add_argument("--pre-launch", action="append", default=[])
+    idle_group = parser.add_mutually_exclusive_group()
+    idle_group.add_argument(
+        "--idle-timeout",
+        dest="idle_timeout_minutes",
+        type=_duration_minutes,
+        metavar="DURATION",
+        help="override idle shutdown timeout (for example 15m or 2h)",
+    )
+    idle_group.add_argument(
+        "--no-idle-shutdown",
+        action="store_true",
+        help="disable automatic idle shutdown",
+    )
 
 
 def _render_file(args: argparse.Namespace) -> int:
@@ -120,6 +147,7 @@ def _render_bootstrap(args: argparse.Namespace) -> int:
 
 
 def _add_file_args(parser: argparse.ArgumentParser) -> None:
+    _add_context_arg(parser)
     parser.add_argument("--namespace")
     parser.add_argument("--user")
     parser.add_argument("--output")
@@ -136,6 +164,7 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
 
 def _add_ready_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("spec")
+    _add_context_arg(parser)
     parser.add_argument("--cluster")
     parser.add_argument("--namespace")
     parser.add_argument("--user")
@@ -388,6 +417,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "bootstrap", help="render namespace prerequisites to stdout"
     )
     render_bootstrap_parser.add_argument("--cluster")
+    _add_context_arg(render_bootstrap_parser)
     render_bootstrap_parser.add_argument("--namespace")
     render_bootstrap_parser.set_defaults(func=_render_bootstrap)
 
@@ -444,10 +474,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "bootstrap", help="apply namespace prerequisites declared by the cluster profile"
     )
     deploy_bootstrap_parser.add_argument("--cluster")
+    _add_context_arg(deploy_bootstrap_parser)
     deploy_bootstrap_parser.add_argument("--namespace")
     deploy_bootstrap_parser.set_defaults(func=bootstrap)
 
     servers_parser = sub.add_parser("servers", help="list live Manifesto servers in the namespace")
+    _add_context_arg(servers_parser)
     servers_parser.add_argument("--namespace")
     servers_parser.add_argument("--instance")
     servers_parser.add_argument("--output", choices=["table", "name", "json"], default="table")
@@ -456,6 +488,7 @@ def _build_parser() -> argparse.ArgumentParser:
     stop_parser = sub.add_parser("stop", help="discover and delete a live Manifesto server")
     stop_parser.add_argument("spec", nargs="?")
     stop_parser.add_argument("--instance")
+    _add_context_arg(stop_parser)
     stop_parser.add_argument("--namespace")
     stop_parser.add_argument("--user")
     # Retain legacy render flags as accepted no-ops now that stop discovers live state.
@@ -476,6 +509,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     e2e_parser.add_argument("spec")
     e2e_parser.add_argument("--cluster")
+    _add_context_arg(e2e_parser)
     e2e_parser.add_argument("--namespace")
     e2e_parser.add_argument("--user")
     e2e_parser.add_argument("--routing-profile")

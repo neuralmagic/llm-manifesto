@@ -100,21 +100,39 @@ class RuntimeConfig:
     namespace: str
     cluster_path: str | None
     render_out: Path
+    context: str | None = None
 
     @classmethod
     def from_args(cls, args, *, require_cluster: bool = True) -> "RuntimeConfig":
         load_dotenv()
         user = resolve_user(getattr(args, "user", None))
-        namespace = resolve_namespace(getattr(args, "namespace", None))
-        cluster_path = resolve_cluster(getattr(args, "cluster", None)) if require_cluster else getattr(args, "cluster", None)
+        context = getattr(args, "context", None)
+        namespace = resolve_namespace(getattr(args, "namespace", None), context=context)
+        cluster_path = (
+            resolve_cluster(getattr(args, "cluster", None), context=context)
+            if require_cluster
+            else getattr(args, "cluster", None)
+        )
         render_out = Path(
             getattr(args, "output", None)
             or os.environ.get("MANIFESTO_RENDER_OUT", f"/tmp/{user}-manifesto.yaml")
         )
-        return cls(user=user, namespace=namespace, cluster_path=cluster_path, render_out=render_out)
+        return cls(
+            user=user,
+            namespace=namespace,
+            cluster_path=cluster_path,
+            render_out=render_out,
+            context=context,
+        )
+
+    def kubectl_base(self) -> list[str]:
+        command = ["kubectl"]
+        if self.context:
+            command.extend(["--context", self.context])
+        return command
 
     def kubectl(self) -> list[str]:
-        return ["kubectl", "-n", self.namespace]
+        return [*self.kubectl_base(), "-n", self.namespace]
 
 
 @dataclass(frozen=True)
@@ -267,32 +285,43 @@ def resolve_user(explicit: str | None = None) -> str:
     return explicit or os.environ.get("USER") or "dev"
 
 
-def resolve_namespace(explicit: str | None = None) -> str:
+def resolve_namespace(explicit: str | None = None, *, context: str | None = None) -> str:
     if explicit:
         return explicit
     if os.environ.get("MANIFESTO_NAMESPACE"):
         return os.environ["MANIFESTO_NAMESPACE"]
-    namespace = capture(["kubectl", "config", "view", "--minify", "-o", "jsonpath={..namespace}"], check=False)
+    command = ["kubectl"]
+    if context:
+        command.extend(["--context", context])
+    namespace = capture(
+        [*command, "config", "view", "--minify", "-o", "jsonpath={..namespace}"],
+        check=False,
+    )
     return namespace.strip() or "default"
 
 
-def resolve_cluster(explicit: str | None = None) -> str:
+def resolve_cluster(explicit: str | None = None, *, context: str | None = None) -> str:
     if explicit:
         return resolve_catalog_path(explicit, "clusters")
     if os.environ.get("MANIFESTO_CLUSTER"):
         return resolve_catalog_path(os.environ["MANIFESTO_CLUSTER"], "clusters")
     mapping = os.environ.get("MANIFESTO_CLUSTER_MAP", "")
-    context = capture(["kubectl", "config", "current-context"], check=False).strip()
+    selected_context = context or capture(
+        ["kubectl", "config", "current-context"], check=False
+    ).strip()
+    command = ["kubectl"]
+    if context:
+        command.extend(["--context", context])
     kube_cluster = capture(
-        ["kubectl", "config", "view", "--minify", "-o", "jsonpath={.clusters[0].name}"],
+        [*command, "config", "view", "--minify", "-o", "jsonpath={.clusters[0].name}"],
         check=False,
     ).strip()
     if mapping:
         for entry in mapping.split(","):
             key, sep, value = entry.partition("=")
-            if sep and key.strip() in {context, kube_cluster}:
+            if sep and key.strip() in {selected_context, kube_cluster}:
                 return resolve_catalog_path(value.strip(), "clusters")
-    for name in (context, kube_cluster):
+    for name in (selected_context, kube_cluster):
         if not name:
             continue
         candidate = resolve_catalog_path(name, "clusters")
@@ -326,6 +355,11 @@ def apply_runtime_overrides(spec, args, config: RuntimeConfig) -> None:
         spec.accelerator = args.accelerator
     if getattr(args, "vllm_env", None) is not None:
         spec.runtime.vllm_env = args.vllm_env
+    if getattr(args, "idle_timeout_minutes", None) is not None:
+        spec.runtime.idle_shutdown.enabled = True
+        spec.runtime.idle_shutdown.timeout_minutes = args.idle_timeout_minutes
+    if getattr(args, "no_idle_shutdown", False):
+        spec.runtime.idle_shutdown.enabled = False
     spec.runtime.pre_launch.extend(getattr(args, "pre_launch", None) or [])
     routing_profile = getattr(args, "routing_profile", None) or os.environ.get(
         "MANIFESTO_ROUTING_PROFILE"
@@ -385,6 +419,10 @@ def manifest_header(args, config: RuntimeConfig, *, routing_only: bool) -> list[
             command.extend([f"--{name.replace('_', '-')}", value])
     for hook in getattr(args, "pre_launch", None) or []:
         command.extend(["--pre-launch", hook])
+    if getattr(args, "idle_timeout_minutes", None) is not None:
+        command.extend(["--idle-timeout", f"{args.idle_timeout_minutes}m"])
+    if getattr(args, "no_idle_shutdown", False):
+        command.append("--no-idle-shutdown")
     return [
         "Generated by:",
         f"  {shlex.join(command)}",
