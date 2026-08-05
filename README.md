@@ -411,6 +411,7 @@ spec:
 - user, log, and cache path templates
 - llm-d release
 - UCX/NCCL/NVSHMEM/IMEX fabric env profiles
+- optional Kueue LocalQueue selection for GPU LeaderWorkerSets
 
 When a role omits `resources.cpu` or `resources.memory`, Manifesto scales the
 request from the role's inferred GPUs per pod and the cluster policy:
@@ -435,6 +436,25 @@ model_server_resources:
 Explicit role resource values always win. If allocatable capacity is set,
 rendering warns when the number of role pods that fit by GPU would exceed the
 node's aggregate CPU or memory capacity.
+
+### Kueue admission
+
+Multi-node GPU roles render as LeaderWorkerSets and can be admitted through a
+Kueue LocalQueue selected in the cluster profile:
+
+```yaml
+kueue:
+  local_queue: example-gpu-queue
+```
+
+When configured, Manifesto puts `kueue.x-k8s.io/queue-name` on each rendered
+LeaderWorkerSet. The queue is cluster- and namespace-specific operational
+configuration, so it belongs in the private cluster profile rather than a
+shareable model spec. Omitting `kueue` leaves rendered workloads unmanaged.
+CPU-only supporting resources, including the in-cluster end-to-end probe Job,
+do not receive Kueue metadata or suspension. Single-node model roles currently
+render as Deployments and are not covered by this LeaderWorkerSet admission
+path.
 
 The workflow CLI requires a cluster profile for commands that render a spec. Set
 `MANIFESTO_CLUSTER` directly, pass `--cluster`, or set `MANIFESTO_CLUSTER_MAP` in
