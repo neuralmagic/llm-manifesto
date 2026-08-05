@@ -10,6 +10,7 @@ llm_d:
 sidecars:
   dcgm_exporter: nvcr.io/nvidia/k8s/dcgm-exporter:4.5.2-4.8.1-ubuntu22.04
   node_exporter: quay.io/prometheus/node-exporter:v1.9.0
+  idle_shutdown: python:3.12-alpine
 
 test:
   e2e: python:3.12-alpine

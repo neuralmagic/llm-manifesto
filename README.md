@@ -336,6 +336,34 @@ Overrides deep-merge mappings. `roles` may be written as a map keyed by role
 name in override files; each role override is merged into the matching base
 role before normal schema validation.
 
+Every deployment includes an idle-shutdown controller by default. Once all
+expected vLLM API servers are ready, it watches request counters and running or
+queued requests across all roles. After 45 idle minutes it scales the model
+workloads, endpoint picker, and itself to zero. Applying or deploying the spec
+again restores their declared replica counts. Change the timeout or opt out in
+the runtime configuration:
+
+```yaml
+runtime:
+  idle_shutdown:
+    timeout_minutes: 90
+    # enabled: false
+```
+
+Metric or Kubernetes API failures reset the idle timer, so the controller does
+not shut down an instance when it cannot establish that the instance is idle.
+For one-off operations, the CLI can override either setting without editing the
+model spec:
+
+```bash
+manifesto deploy models/qwen/qwen3-0.6b.yaml \
+  --context example-context \
+  --idle-timeout 15m
+
+manifesto render manifest models/qwen/qwen3-0.6b.yaml \
+  --no-idle-shutdown
+```
+
 DeepSeek V4 wide-EP specs use filenames that encode only the parallel layout:
 `<prefill-replicas>P-EP<width>-<decode-replicas>D-EP<width>.yaml`. For example,
 `3P-EP8-1D-EP16.yaml` means three prefill LWS replicas at EP8 and one decode
@@ -417,9 +445,10 @@ MANIFESTO_CLUSTER=clusters/example-gb200.yaml manifesto deploy models/qwen/aggre
 manifesto deploy models/qwen/h200-aggregated.yaml
 ```
 
-The namespace defaults to the current kube context namespace, falling back to
-`default` when the context has no namespace. Set `MANIFESTO_NAMESPACE` in `.env`
-to override it.
+The namespace defaults to the selected kube context namespace, falling back to
+`default` when the context has no namespace. Use `--context` to select a context
+without changing kubectl's current context, or set `MANIFESTO_NAMESPACE` in
+`.env` to override the namespace.
 
 Shared storage is configured without assuming a filesystem implementation:
 

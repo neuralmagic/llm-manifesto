@@ -1,5 +1,6 @@
 """Structural tests for rendered Kubernetes objects and YAML serialization."""
 
+import json
 import os
 import subprocess
 from copy import deepcopy
@@ -69,7 +70,15 @@ def test_stateless_single_rank_render_omits_filesystem_and_distributed_baggage()
     spec = load_spec(ROOT / "models" / "qwen" / "qwen3-0.6b.yaml", cluster)
     objects = render(spec, user="tester", cluster=cluster)
 
-    assert [obj["kind"] for obj in objects] == ["Deployment", "Service"]
+    assert [obj["kind"] for obj in objects] == [
+        "Deployment",
+        "Service",
+        "ServiceAccount",
+        "Role",
+        "RoleBinding",
+        "ConfigMap",
+        "Deployment",
+    ]
     deployment = _find(objects, "Deployment", "decode")
     pod_spec = deployment["spec"]["template"]["spec"]
     container = pod_spec["containers"][0]
@@ -116,6 +125,77 @@ def test_vllm_env_requires_an_absolute_mounted_path():
     spec.runtime.vllm_env = "/mnt/shared/../unmounted/worktree"
     with pytest.raises(ValueError, match="not covered by a model pod volume mount"):
         render(spec, user="tester", cluster=CLUSTER)
+
+
+def test_idle_shutdown_is_enabled_by_default_for_45_minutes():
+    spec = load_spec(ROOT / "models" / DEEPSEEK, CLUSTER)
+    objects = render(spec, user="tester", cluster=CLUSTER)
+    controller = _find(objects, "Deployment", "idle-shutdown")
+    container = controller["spec"]["template"]["spec"]["containers"][0]
+    env = {item["name"]: item for item in container["env"]}
+    workloads = json.loads(env["WORKLOADS"]["value"])
+    targets = json.loads(env["TARGETS"]["value"])
+
+    assert controller["spec"]["replicas"] == 1
+    assert env["TIMEOUT_SECONDS"]["value"] == "2700"
+    assert env["EXPECTED_TARGETS"]["value"] == "16"
+    assert workloads[-1]["name"].endswith("idle-shutdown")
+    assert {workload["name"] for workload in workloads[:-1]} == {
+        "tester-vllm-ep8-decode",
+        "tester-vllm-ep8-prefill",
+        "tester-wide-ep-1p-ep8-1d-ep8-infpool-epp",
+    }
+    assert targets["decode"]["worker_indices"] is None
+    assert targets["prefill"]["worker_indices"] is None
+    role = _find(objects, "Role", "idle-shutdown-rbac")
+    assert role["rules"][-1] == {
+        "apiGroups": ["leaderworkerset.x-k8s.io"],
+        "resources": ["leaderworkersets"],
+        "resourceNames": ["tester-vllm-ep8-decode", "tester-vllm-ep8-prefill"],
+        "verbs": ["get", "patch"],
+    }
+    compile(
+        _find(objects, "ConfigMap", "idle-shutdown")["data"]["idle_shutdown.py"],
+        "idle_shutdown.py",
+        "exec",
+    )
+
+
+def test_idle_shutdown_can_be_disabled_or_given_a_custom_timeout():
+    spec = load_spec(ROOT / "models" / "qwen" / "qwen3-0.6b.yaml", _stateless_cluster())
+    spec.runtime.idle_shutdown.enabled = False
+    objects = render(spec, user="tester", cluster=_stateless_cluster())
+
+    assert not any(
+        obj["metadata"].get("labels", {}).get("app.kubernetes.io/component")
+        == "idle-shutdown"
+        for obj in objects
+    )
+
+    spec.runtime.idle_shutdown.enabled = True
+    spec.runtime.idle_shutdown.timeout_minutes = 12
+    objects = render(spec, user="tester", cluster=_stateless_cluster())
+    controller = _find(objects, "Deployment", "idle-shutdown")
+    env = {
+        item["name"]: item
+        for item in controller["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+
+    assert env["TIMEOUT_SECONDS"]["value"] == "720"
+
+
+def test_idle_shutdown_only_scrapes_cross_node_tp_api_servers():
+    spec = load_spec(ROOT / "models" / "kimi-k3" / "aggregated-tp16-ep16.yaml", CLUSTER)
+    objects = render(spec, user="tester", cluster=CLUSTER)
+    controller = _find(objects, "Deployment", "idle-shutdown")
+    env = {
+        item["name"]: item
+        for item in controller["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    targets = json.loads(env["TARGETS"]["value"])
+
+    assert targets["decode"]["worker_indices"] == ["0"]
+    assert env["EXPECTED_TARGETS"]["value"] == "1"
 
 
 def test_cluster_schema_rejects_removed_dev_configuration(tmp_path):

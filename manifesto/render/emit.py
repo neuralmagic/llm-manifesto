@@ -7,6 +7,7 @@ import io
 import yaml
 
 from .base import render_dcgm_metrics_configmap, render_model_server_service, render_openshift_scc_binding, render_service_account
+from .idle_shutdown import render_idle_shutdown
 from .lws import render_workload
 from .routing import render_routing
 from ..cluster import Cluster
@@ -61,6 +62,7 @@ def render(spec: DeploymentSpec, *, user: str, cluster: Cluster, routing_only: b
                 leader_only=parallel_layout(role).cross_node_tp,
             )
         )
+    objects.extend(render_idle_shutdown(spec, instance, cluster))
     objects.extend(render_routing(spec, instance, cluster))
     return objects
 

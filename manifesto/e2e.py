@@ -339,7 +339,7 @@ def e2e(args: argparse.Namespace) -> int:
     spec = _preflight(run_args, config, cluster)
 
     existing = workflow.capture(
-        ["kubectl", "get", f"namespace/{namespace}", "-o", "name"],
+        [*config.kubectl_base(), "get", f"namespace/{namespace}", "-o", "name"],
         check=False,
     )
     if existing.strip():
@@ -349,7 +349,7 @@ def e2e(args: argparse.Namespace) -> int:
         )
 
     print(f"Creating disposable namespace {namespace}...")
-    rc = workflow.run(["kubectl", "create", "namespace", namespace])
+    rc = workflow.run([*config.kubectl_base(), "create", "namespace", namespace])
     if rc:
         return rc
 
@@ -363,7 +363,7 @@ def e2e(args: argparse.Namespace) -> int:
             print(f"Deleting namespace {namespace}...")
             cleanup_rc = workflow.run(
                 [
-                    "kubectl",
+                    *config.kubectl_base(),
                     "delete",
                     f"namespace/{namespace}",
                     "--wait=true",

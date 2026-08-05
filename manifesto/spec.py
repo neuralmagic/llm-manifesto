@@ -205,6 +205,15 @@ class ModelSpec(BaseModel):
         return self.label or self.id.rsplit("/", 1)[-1]
 
 
+class IdleShutdownSpec(BaseModel):
+    """Scale an idle Manifesto instance to zero after a bounded timeout."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    timeout_minutes: int = Field(45, ge=1)
+
+
 class RuntimeSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -212,6 +221,7 @@ class RuntimeSpec(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     pre_launch: list[str] = Field(default_factory=list)
     sidecars: list[str] = Field(default_factory=lambda: ["dcgm-exporter", "node-exporter"])
+    idle_shutdown: IdleShutdownSpec = Field(default_factory=IdleShutdownSpec)
 
 
 class EppSpec(BaseModel):
