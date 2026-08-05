@@ -1,5 +1,6 @@
 """Kueue admission metadata for GPU serving workloads."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,14 @@ def _render(model: str, *, queue: str | None) -> list[dict]:
 
 def _lws_pod_spec(workload: dict) -> dict:
     return workload["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"]
+
+
+def _find(objects: list[dict], kind: str, name_suffix: str) -> dict:
+    return next(
+        obj
+        for obj in objects
+        if obj["kind"] == kind and obj["metadata"]["name"].endswith(name_suffix)
+    )
 
 
 def test_aggregate_lws_uses_declarative_local_queue_without_resource_changes():
@@ -82,6 +91,76 @@ def test_pd_lws_roles_share_queue_and_preserve_complete_pod_specs():
             "resources" in container for container in pod_spec.get("initContainers", [])
         )
     assert _lws_pod_spec(queued_lws["decode"])["initContainers"]
+
+
+def test_single_node_aggregate_is_promoted_to_lws_without_pod_or_selector_changes():
+    model = "qwen/aggregated.yaml"
+    queued = _render(model, queue=QUEUE)
+    unqueued = _render(model, queue=None)
+    lws = _find(queued, "LeaderWorkerSet", "decode")
+    deployment = _find(unqueued, "Deployment", "decode")
+
+    assert lws["metadata"]["labels"][KUEUE_QUEUE_LABEL] == QUEUE
+    assert lws["spec"]["leaderWorkerTemplate"]["size"] == 1
+    assert lws["spec"]["replicas"] == deployment["spec"]["replicas"]
+    assert (
+        lws["spec"]["leaderWorkerTemplate"]["workerTemplate"]
+        == deployment["spec"]["template"]
+    )
+    assert (
+        _find(queued, "Service", "decode-svc")["spec"]
+        == _find(unqueued, "Service", "decode-svc")["spec"]
+    )
+    assert (
+        _find(queued, "InferencePool", "infpool")["spec"]
+        == _find(unqueued, "InferencePool", "infpool")["spec"]
+    )
+
+    controller = _find(queued, "Deployment", "idle-shutdown")
+    env = {
+        item["name"]: item
+        for item in controller["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    workloads = json.loads(env["WORKLOADS"]["value"])
+    model_workload = next(item for item in workloads if item["name"].endswith("decode"))
+    assert "/leaderworkersets/" in model_workload["path"]
+    role = _find(queued, "Role", "idle-shutdown-rbac")
+    assert any(
+        rule["apiGroups"] == ["leaderworkerset.x-k8s.io"]
+        and model_workload["name"] in rule["resourceNames"]
+        for rule in role["rules"]
+    )
+
+
+def test_single_node_pd_roles_are_promoted_to_lws_with_equivalent_pod_specs():
+    model = ROOT / "models" / "deepseek-v4/1P-EP8-1D-EP8.yaml"
+    renders = {}
+    for queue in (None, QUEUE):
+        cluster = load_cluster(CLUSTER_PATH)
+        cluster.kueue.local_queue = queue
+        spec = load_spec(model, cluster)
+        for role in spec.roles:
+            role.lws.size = 1
+            role.parallelism.dp = 4
+        renders[queue] = render(spec, user="tester", cluster=cluster)
+
+    queued = renders[QUEUE]
+    unqueued = renders[None]
+    for role in ("prefill", "decode"):
+        lws = _find(queued, "LeaderWorkerSet", role)
+        deployment = _find(unqueued, "Deployment", role)
+        assert lws["metadata"]["labels"][KUEUE_QUEUE_LABEL] == QUEUE
+        assert lws["spec"]["leaderWorkerTemplate"]["size"] == 1
+        assert (
+            lws["spec"]["leaderWorkerTemplate"]["workerTemplate"]
+            == deployment["spec"]["template"]
+        )
+        assert (
+            _find(queued, "Service", f"{role}-svc")["spec"]
+            == _find(unqueued, "Service", f"{role}-svc")["spec"]
+        )
+
+    assert _lws_pod_spec(_find(queued, "LeaderWorkerSet", "decode"))["initContainers"]
 
 
 def test_queue_metadata_is_omitted_from_non_lws_resources():

@@ -19,9 +19,11 @@ from pydantic import ValidationError
 
 from .cluster import load_cluster
 from .e2e import E2E_IMAGE, e2e
+from .features import WorkloadKind
 from .instance import Instance
 from .overrides import load_routing_profile, load_spec_data
 from .render import render
+from .render.lws import uses_leader_worker_set
 from .resolve import resolve_role
 from .spec import load_spec
 from .workflow import (
@@ -80,7 +82,15 @@ def _explain(args: argparse.Namespace) -> int:
         roles.append(
             {
                 "name": role.name,
-                "workload": str(resolved.features.workload_kind),
+                "workload": str(
+                    WorkloadKind.LEADER_WORKER_SET
+                    if uses_leader_worker_set(
+                        cluster,
+                        role,
+                        resolved.features.workload_kind,
+                    )
+                    else WorkloadKind.DEPLOYMENT
+                ),
                 "features": sorted(str(feature) for feature in resolved.features.enabled),
                 "backends": sorted(resolved.features.backends),
                 "fabric_profile": resolved.fabric_profile,

@@ -6,12 +6,12 @@ import hashlib
 import json
 
 from ..cluster import Cluster
-from ..features import WorkloadKind
 from ..images import DEFAULT_IMAGES
 from ..instance import Instance
 from ..parallelism import parallel_layout
 from ..resolve import resolve_role
 from ..spec import DeploymentSpec, RoutingKind
+from .lws import uses_leader_worker_set
 
 
 IDLE_SHUTDOWN_SCRIPT = r'''import json
@@ -214,7 +214,11 @@ def render_idle_shutdown(
             * serving_pods_per_replica
             * len(resolved.ports.backend)
         )
-        if resolved.features.workload_kind == WorkloadKind.DEPLOYMENT:
+        if not uses_leader_worker_set(
+            cluster,
+            role,
+            resolved.features.workload_kind,
+        ):
             deployment_names.append(workload_name)
             model_workloads.append(
                 {

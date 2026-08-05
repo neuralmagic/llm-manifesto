@@ -23,6 +23,17 @@ LWS_GROUP_KEY_LABEL = "leaderworkerset.sigs.k8s.io/group-key"
 KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
 
 
+def uses_leader_worker_set(
+    cluster: Cluster,
+    role: RoleSpec,
+    native_kind: WorkloadKind,
+) -> bool:
+    """Use an LWS whenever Kueue must admit a GPU-bearing serving role."""
+    return native_kind == WorkloadKind.LEADER_WORKER_SET or bool(
+        cluster.kueue.local_queue and role.resources.gpus > 0
+    )
+
+
 def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, role: RoleSpec) -> dict:
     resolved = resolve_role(spec, instance, cluster, role)
     accelerator = spec.accelerator_config(cluster)
@@ -280,7 +291,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
     if resolved.resource_claims:
         pod_spec["resourceClaims"] = resolved.resource_claims
 
-    if resolved.features.workload_kind == WorkloadKind.DEPLOYMENT:
+    if not uses_leader_worker_set(cluster, role, resolved.features.workload_kind):
         selector = instance.pod_selector(role.name)
         return {
             "apiVersion": "apps/v1",

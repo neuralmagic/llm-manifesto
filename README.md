@@ -439,22 +439,22 @@ node's aggregate CPU or memory capacity.
 
 ### Kueue admission
 
-Multi-node GPU roles render as LeaderWorkerSets and can be admitted through a
-Kueue LocalQueue selected in the cluster profile:
+GPU roles can be admitted through a Kueue LocalQueue selected in the cluster
+profile:
 
 ```yaml
 kueue:
   local_queue: example-gpu-queue
 ```
 
-When configured, Manifesto puts `kueue.x-k8s.io/queue-name` on each rendered
-LeaderWorkerSet. The queue is cluster- and namespace-specific operational
-configuration, so it belongs in the private cluster profile rather than a
-shareable model spec. Omitting `kueue` leaves rendered workloads unmanaged.
+When configured, Manifesto renders every GPU-bearing model role as a
+LeaderWorkerSet, including a size-1 LeaderWorkerSet for a role that would
+otherwise be a Deployment, and puts `kueue.x-k8s.io/queue-name` on it. The
+queue is cluster- and namespace-specific operational configuration, so it
+belongs in the private cluster profile rather than a shareable model spec.
+Omitting `kueue` preserves the normal Deployment/LeaderWorkerSet selection.
 CPU-only supporting resources, including the in-cluster end-to-end probe Job,
-do not receive Kueue metadata or suspension. Single-node model roles currently
-render as Deployments and are not covered by this LeaderWorkerSet admission
-path.
+do not receive Kueue metadata or suspension.
 
 The workflow CLI requires a cluster profile for commands that render a spec. Set
 `MANIFESTO_CLUSTER` directly, pass `--cluster`, or set `MANIFESTO_CLUSTER_MAP` in
