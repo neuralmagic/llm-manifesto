@@ -32,19 +32,19 @@ TIMEOUT_SECONDS = int(os.environ["TIMEOUT_SECONDS"])
 POLL_SECONDS = 60
 WORKLOADS = json.loads(os.environ["WORKLOADS"])
 
-with open(TOKEN_PATH, encoding="utf-8") as token_file:
-    TOKEN = token_file.read().strip()
 CONTEXT = ssl.create_default_context(cafile=CA_PATH)
 
 
 def api_request(path, *, method="GET", body=None):
     data = None if body is None else json.dumps(body).encode()
+    with open(TOKEN_PATH, encoding="utf-8") as token_file:
+        token = token_file.read().strip()
     request = urllib.request.Request(
         API + path,
         data=data,
         method=method,
         headers={
-            "Authorization": f"Bearer {TOKEN}",
+            "Authorization": f"Bearer {token}",
             "Accept": "application/json",
             "Content-Type": "application/merge-patch+json",
         },
@@ -111,9 +111,30 @@ def scrape_activity(targets):
 
 
 def scale_to_zero():
-    for workload in WORKLOADS:
-        api_request(workload["path"], method="PATCH", body={"spec": {"replicas": 0}})
-        print(f"scaled {workload['name']} to zero", flush=True)
+    scaled = []
+    try:
+        for workload in WORKLOADS:
+            api_request(workload["path"], method="PATCH", body={"spec": {"replicas": 0}})
+            scaled.append(workload)
+            print(f"scaled {workload['name']} to zero", flush=True)
+    except Exception:
+        for workload in reversed(scaled):
+            try:
+                api_request(
+                    workload["path"],
+                    method="PATCH",
+                    body={"spec": {"replicas": workload["replicas"]}},
+                )
+                print(
+                    f"restored {workload['name']} to {workload['replicas']} replicas",
+                    flush=True,
+                )
+            except Exception as rollback_error:
+                print(
+                    f"failed to restore {workload['name']}: {rollback_error}",
+                    flush=True,
+                )
+        raise
 
 
 last_activity = time.monotonic()
@@ -162,7 +183,7 @@ def render_idle_shutdown(
         ).hexdigest()
     }
     rules: list[dict] = []
-    model_workloads: list[dict[str, str]] = []
+    model_workloads: list[dict[str, str | int]] = []
     deployment_names: list[str] = []
     lws_names: list[str] = []
     targets: dict[str, dict] = {}
@@ -199,6 +220,7 @@ def render_idle_shutdown(
                 {
                     "name": workload_name,
                     "path": f"/apis/apps/v1/namespaces/{spec.namespace}/deployments/{workload_name}",
+                    "replicas": role.lws.replicas,
                 }
             )
         else:
@@ -207,6 +229,7 @@ def render_idle_shutdown(
                 {
                     "name": workload_name,
                     "path": f"/apis/leaderworkerset.x-k8s.io/v1/namespaces/{spec.namespace}/leaderworkersets/{workload_name}",
+                    "replicas": role.lws.replicas,
                 }
             )
     workloads = model_workloads
@@ -217,12 +240,17 @@ def render_idle_shutdown(
             {
                 "name": epp_name,
                 "path": f"/apis/apps/v1/namespaces/{spec.namespace}/deployments/{epp_name}",
+                "replicas": (
+                    spec.routing.epp.replicas
+                    if spec.routing.epp is not None
+                    else spec.routing.replicas
+                ),
             }
         )
 
     controller_path = f"/apis/apps/v1/namespaces/{spec.namespace}/deployments/{name}"
     # Stop the detector last. Re-applying the manifest restores every desired replica count.
-    workloads.append({"name": name, "path": controller_path})
+    workloads.append({"name": name, "path": controller_path, "replicas": 1})
 
     rules.append(
         {
