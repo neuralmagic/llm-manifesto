@@ -61,18 +61,42 @@ def _lws(queue: str | None = QUEUE) -> dict:
     }
 
 
-def _deployment() -> dict:
+def _deployment(queue: str | None = QUEUE) -> dict:
+    labels = {
+        "app.kubernetes.io/name": "manifesto",
+        "app.kubernetes.io/component": "model-server",
+    }
+    pod_labels = {"app.kubernetes.io/name": "manifesto"}
+    if queue:
+        labels[workflow.KUEUE_QUEUE_LABEL] = queue
+        pod_labels[workflow.KUEUE_QUEUE_LABEL] = queue
     return {
         "apiVersion": "apps/v1",
         "kind": "Deployment",
         "metadata": {
             "name": "tester-model",
-            "labels": {
-                "app.kubernetes.io/name": "manifesto",
-                "llm-d.ai/inferenceServing": "true",
+            "labels": labels,
+        },
+        "spec": {
+            "replicas": 1,
+            "template": {
+                "metadata": {"labels": pod_labels},
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "vllm",
+                            "resources": {
+                                "requests": {
+                                    "cpu": "8",
+                                    "memory": "64Gi",
+                                    "nvidia.com/gpu": "1",
+                                }
+                            },
+                        }
+                    ]
+                },
             },
         },
-        "spec": {},
     }
 
 
@@ -189,6 +213,26 @@ def test_lws_to_deployment_deletes_obsolete_kind_before_apply(monkeypatch):
 
 @pytest.mark.parametrize(
     ("live_queue", "desired_queue"),
+    [(None, QUEUE), ("old-queue", QUEUE), (QUEUE, None)],
+)
+def test_deployment_queue_change_uses_rollout_without_controller_deletion(
+    monkeypatch, live_queue, desired_queue
+):
+    events = _install_fakes(
+        monkeypatch,
+        _deployment(desired_queue),
+        deployment=_deployment(live_queue),
+    )
+
+    assert workflow.deploy(object(), config=CONFIG) == 0
+
+    runs = [event for event in events if event[0] == "run"]
+    assert [run[1][3] for run in runs] == ["apply", "apply"]
+    assert not any("delete" in run[1] for run in runs)
+
+
+@pytest.mark.parametrize(
+    ("live_queue", "desired_queue"),
     [("old-queue", QUEUE), (QUEUE, None)],
 )
 def test_lws_queue_change_recreates_before_apply(
@@ -286,3 +330,16 @@ def test_preflight_surfaces_all_podset_container_requests(monkeypatch, capsys):
         in output
     )
     assert events
+
+
+def test_deployment_preflight_does_not_require_lws_api(monkeypatch, capsys):
+    events = _install_fakes(monkeypatch, _deployment())
+
+    workflow.preflight_workloads(CONFIG, [_deployment()])
+
+    assert not any(
+        "--api-group=leaderworkerset.x-k8s.io" in event[1]
+        for event in events
+        if event[0] == "capture"
+    )
+    assert "Deployment/tester-model" in capsys.readouterr().err

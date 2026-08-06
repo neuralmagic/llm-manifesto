@@ -23,17 +23,6 @@ LWS_GROUP_KEY_LABEL = "leaderworkerset.sigs.k8s.io/group-key"
 KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
 
 
-def uses_leader_worker_set(
-    cluster: Cluster,
-    role: RoleSpec,
-    native_kind: WorkloadKind,
-) -> bool:
-    """Use an LWS whenever Kueue must admit a GPU-bearing serving role."""
-    return native_kind == WorkloadKind.LEADER_WORKER_SET or bool(
-        cluster.kueue.local_queue and role.resources.gpus > 0
-    )
-
-
 def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, role: RoleSpec) -> dict:
     resolved = resolve_role(spec, instance, cluster, role)
     accelerator = spec.accelerator_config(cluster)
@@ -293,14 +282,21 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
     if resolved.resource_claims:
         pod_spec["resourceClaims"] = resolved.resource_claims
 
-    if not uses_leader_worker_set(cluster, role, resolved.features.workload_kind):
+    if resolved.features.workload_kind == WorkloadKind.DEPLOYMENT:
         selector = instance.pod_selector(role.name)
+        workload_labels = instance.labels("model-server", role.name)
+        deployment_pod_metadata = copy.deepcopy(pod_metadata)
+        if cluster.kueue.local_queue and role.resources.gpus > 0:
+            workload_labels[KUEUE_QUEUE_LABEL] = cluster.kueue.local_queue
+            deployment_pod_metadata["labels"][KUEUE_QUEUE_LABEL] = (
+                cluster.kueue.local_queue
+            )
         return {
             "apiVersion": "apps/v1",
             "kind": "Deployment",
             "metadata": {
                 "name": workload_name,
-                "labels": instance.labels("model-server", role.name),
+                "labels": workload_labels,
             },
             "spec": {
                 "replicas": role.lws.replicas,
@@ -310,7 +306,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
                     "rollingUpdate": {"maxSurge": 0, "maxUnavailable": "100%"},
                 },
                 "template": {
-                    "metadata": pod_metadata,
+                    "metadata": deployment_pod_metadata,
                     "spec": pod_spec,
                 },
             },

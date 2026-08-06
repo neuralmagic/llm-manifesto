@@ -38,7 +38,7 @@ model_server_resources:
   cpu_per_gpu: "8"
   memory_per_gpu: 128Gi
 
-# Opt GPU LeaderWorkerSets into a namespace LocalQueue by declaring, for example:
+# Opt GPU serving workloads into a namespace LocalQueue by declaring, for example:
 # kueue:
 #   local_queue: example-gpu-queue
 

@@ -45,6 +45,12 @@ def test_aggregate_lws_uses_declarative_local_queue_without_resource_changes():
     unqueued_lws = next(obj for obj in unqueued if obj["kind"] == "LeaderWorkerSet")
 
     assert queued_lws["metadata"]["labels"][KUEUE_QUEUE_LABEL] == QUEUE
+    assert (
+        KUEUE_QUEUE_LABEL
+        not in queued_lws["spec"]["leaderWorkerTemplate"]["workerTemplate"]["metadata"][
+            "labels"
+        ]
+    )
     assert KUEUE_QUEUE_LABEL not in unqueued_lws["metadata"]["labels"]
     assert _lws_pod_spec(queued_lws) == _lws_pod_spec(unqueued_lws)
 
@@ -93,19 +99,25 @@ def test_pd_lws_roles_share_queue_and_preserve_complete_pod_specs():
     assert _lws_pod_spec(queued_lws["decode"])["initContainers"]
 
 
-def test_single_node_aggregate_is_promoted_to_lws_without_pod_or_selector_changes():
+def test_single_node_aggregate_remains_deployment_with_independent_pod_admission():
     model = "qwen/aggregated.yaml"
     queued = _render(model, queue=QUEUE)
     unqueued = _render(model, queue=None)
-    lws = _find(queued, "LeaderWorkerSet", "decode")
-    deployment = _find(unqueued, "Deployment", "decode")
+    deployment = _find(queued, "Deployment", "decode")
+    unqueued_deployment = _find(unqueued, "Deployment", "decode")
 
-    assert lws["metadata"]["labels"][KUEUE_QUEUE_LABEL] == QUEUE
-    assert lws["spec"]["leaderWorkerTemplate"]["size"] == 1
-    assert lws["spec"]["replicas"] == deployment["spec"]["replicas"]
+    assert deployment["metadata"]["labels"][KUEUE_QUEUE_LABEL] == QUEUE
     assert (
-        lws["spec"]["leaderWorkerTemplate"]["workerTemplate"]
-        == deployment["spec"]["template"]
+        deployment["spec"]["template"]["metadata"]["labels"][KUEUE_QUEUE_LABEL] == QUEUE
+    )
+    assert KUEUE_QUEUE_LABEL not in unqueued_deployment["metadata"]["labels"]
+    assert (
+        KUEUE_QUEUE_LABEL
+        not in unqueued_deployment["spec"]["template"]["metadata"]["labels"]
+    )
+    assert (
+        deployment["spec"]["template"]["spec"]
+        == unqueued_deployment["spec"]["template"]["spec"]
     )
     assert (
         _find(queued, "Service", "decode-svc")["spec"]
@@ -123,16 +135,16 @@ def test_single_node_aggregate_is_promoted_to_lws_without_pod_or_selector_change
     }
     workloads = json.loads(env["WORKLOADS"]["value"])
     model_workload = next(item for item in workloads if item["name"].endswith("decode"))
-    assert "/leaderworkersets/" in model_workload["path"]
+    assert "/deployments/" in model_workload["path"]
     role = _find(queued, "Role", "idle-shutdown-rbac")
     assert any(
-        rule["apiGroups"] == ["leaderworkerset.x-k8s.io"]
+        rule["apiGroups"] == ["apps"]
         and model_workload["name"] in rule["resourceNames"]
         for rule in role["rules"]
     )
 
 
-def test_single_node_pd_roles_are_promoted_to_lws_with_equivalent_pod_specs():
+def test_single_node_pd_roles_remain_independently_admitted_deployments():
     model = ROOT / "models" / "deepseek-v4/1P-EP8-1D-EP8.yaml"
     renders = {}
     for queue in (None, QUEUE):
@@ -147,20 +159,25 @@ def test_single_node_pd_roles_are_promoted_to_lws_with_equivalent_pod_specs():
     queued = renders[QUEUE]
     unqueued = renders[None]
     for role in ("prefill", "decode"):
-        lws = _find(queued, "LeaderWorkerSet", role)
-        deployment = _find(unqueued, "Deployment", role)
-        assert lws["metadata"]["labels"][KUEUE_QUEUE_LABEL] == QUEUE
-        assert lws["spec"]["leaderWorkerTemplate"]["size"] == 1
+        deployment = _find(queued, "Deployment", role)
+        unqueued_deployment = _find(unqueued, "Deployment", role)
+        assert deployment["metadata"]["labels"][KUEUE_QUEUE_LABEL] == QUEUE
         assert (
-            lws["spec"]["leaderWorkerTemplate"]["workerTemplate"]
-            == deployment["spec"]["template"]
+            deployment["spec"]["template"]["metadata"]["labels"][KUEUE_QUEUE_LABEL]
+            == QUEUE
+        )
+        assert (
+            deployment["spec"]["template"]["spec"]
+            == unqueued_deployment["spec"]["template"]["spec"]
         )
         assert (
             _find(queued, "Service", f"{role}-svc")["spec"]
             == _find(unqueued, "Service", f"{role}-svc")["spec"]
         )
 
-    assert _lws_pod_spec(_find(queued, "LeaderWorkerSet", "decode"))["initContainers"]
+    assert _find(queued, "Deployment", "decode")["spec"]["template"]["spec"][
+        "initContainers"
+    ]
 
 
 def test_queue_metadata_is_omitted_from_non_lws_resources():
@@ -193,6 +210,21 @@ def test_zero_gpu_native_lws_is_unqueued_and_omits_accelerator_resources():
     )
 
     assert KUEUE_QUEUE_LABEL not in lws["metadata"]["labels"]
+    assert "nvidia.com/gpu" not in vllm["resources"]["requests"]
+    assert "nvidia.com/gpu" not in vllm["resources"]["limits"]
+
+
+def test_zero_gpu_native_deployment_is_unqueued_and_omits_accelerator_resources():
+    cluster = load_cluster(CLUSTER_PATH)
+    cluster.kueue.local_queue = QUEUE
+    spec = load_spec(ROOT / "models" / "qwen/aggregated.yaml", cluster)
+    spec.role("decode").resources.gpus = 0
+    objects = render(spec, user="tester", cluster=cluster)
+    deployment = _find(objects, "Deployment", "decode")
+    vllm = deployment["spec"]["template"]["spec"]["containers"][0]
+
+    assert KUEUE_QUEUE_LABEL not in deployment["metadata"]["labels"]
+    assert KUEUE_QUEUE_LABEL not in deployment["spec"]["template"]["metadata"]["labels"]
     assert "nvidia.com/gpu" not in vllm["resources"]["requests"]
     assert "nvidia.com/gpu" not in vllm["resources"]["limits"]
 

@@ -479,15 +479,17 @@ def parse_manifest(manifest: str) -> list[dict]:
 
 
 def _model_workloads(objects: list[dict]) -> list[dict]:
-    return [
-        obj
-        for obj in objects
-        if obj.get("kind") in {"Deployment", "LeaderWorkerSet"}
-        and obj.get("metadata", {})
-        .get("labels", {})
-        .get("llm-d.ai/inferenceServing")
-        == "true"
-    ]
+    workloads = []
+    for obj in objects:
+        if obj.get("kind") not in {"Deployment", "LeaderWorkerSet"}:
+            continue
+        labels = obj.get("metadata", {}).get("labels", {})
+        if (
+            labels.get("llm-d.ai/inferenceServing") == "true"
+            or labels.get("app.kubernetes.io/component") == "model-server"
+        ):
+            workloads.append(obj)
+    return workloads
 
 
 def _api_resources(config: RuntimeConfig, group: str) -> set[str]:
@@ -527,21 +529,31 @@ def _format_requests(requests: dict) -> str:
     return ", ".join(f"{name}={value}" for name, value in sorted(requests.items()))
 
 
-def _surface_lws_requests(workload: dict) -> None:
-    name = workload["metadata"]["name"]
+def _workload_pod_templates(workload: dict) -> list[tuple[str, dict]]:
+    if workload["kind"] == "Deployment":
+        return [("pod", workload["spec"]["template"])]
     template = workload["spec"]["leaderWorkerTemplate"]
-    replicas = workload["spec"].get("replicas", 1)
-    size = template.get("size", 1)
-    queue = workload["metadata"].get("labels", {}).get(KUEUE_QUEUE_LABEL, "unmanaged")
-    print(
-        f"Kueue preflight {name}: queue={queue}, replicas={replicas}, "
-        f"pods-per-replica={size}",
-        file=sys.stderr,
-    )
     pod_templates = [("worker", template["workerTemplate"])]
     if "leaderTemplate" in template:
         pod_templates.append(("leader", template["leaderTemplate"]))
-    for pod_set, pod_template in pod_templates:
+    return pod_templates
+
+
+def _surface_workload_requests(workload: dict) -> None:
+    name = workload["metadata"]["name"]
+    replicas = workload["spec"].get("replicas", 1)
+    size = (
+        workload["spec"]["leaderWorkerTemplate"].get("size", 1)
+        if workload["kind"] == "LeaderWorkerSet"
+        else 1
+    )
+    queue = workload["metadata"].get("labels", {}).get(KUEUE_QUEUE_LABEL, "unmanaged")
+    print(
+        f"Kueue preflight {workload['kind']}/{name}: queue={queue}, replicas={replicas}, "
+        f"pods-per-replica={size}",
+        file=sys.stderr,
+    )
+    for pod_set, pod_template in _workload_pod_templates(workload):
         pod_spec = pod_template.get("spec", {})
         for field in ("resources", "overhead"):
             values = pod_spec.get(field, {})
@@ -560,13 +572,9 @@ def _surface_lws_requests(workload: dict) -> None:
                 )
 
 
-def _lws_request_resources(workload: dict) -> set[str]:
+def _workload_request_resources(workload: dict) -> set[str]:
     resources: set[str] = set()
-    template = workload["spec"]["leaderWorkerTemplate"]
-    pod_templates = [template["workerTemplate"]]
-    if "leaderTemplate" in template:
-        pod_templates.append(template["leaderTemplate"])
-    for pod_template in pod_templates:
+    for _, pod_template in _workload_pod_templates(workload):
         pod_spec = pod_template.get("spec", {})
         resources.update(pod_spec.get("resources", {}).get("requests", {}))
         resources.update(pod_spec.get("overhead", {}))
@@ -584,21 +592,23 @@ def _cluster_queue_covered_resources(cluster_queue: dict) -> set[str]:
 
 
 def preflight_workloads(config: RuntimeConfig, objects: list[dict]) -> None:
-    lws_objects = [obj for obj in _model_workloads(objects) if obj["kind"] == "LeaderWorkerSet"]
-    if not lws_objects:
+    workloads = _model_workloads(objects)
+    if not workloads:
         return
-    served = _api_resources(config, "leaderworkerset.x-k8s.io")
-    if LWS_RESOURCE_TYPE not in served:
-        raise WorkflowError(
-            "workload preflight failed: LeaderWorkerSet API is not served "
-            f"({LWS_RESOURCE_TYPE})"
-        )
+    lws_objects = [obj for obj in workloads if obj["kind"] == "LeaderWorkerSet"]
+    if lws_objects:
+        served = _api_resources(config, "leaderworkerset.x-k8s.io")
+        if LWS_RESOURCE_TYPE not in served:
+            raise WorkflowError(
+                "workload preflight failed: LeaderWorkerSet API is not served "
+                f"({LWS_RESOURCE_TYPE})"
+            )
 
-    for workload in lws_objects:
-        _surface_lws_requests(workload)
+    for workload in workloads:
+        _surface_workload_requests(workload)
     queues = {
         obj["metadata"].get("labels", {}).get(KUEUE_QUEUE_LABEL)
-        for obj in lws_objects
+        for obj in workloads
     } - {None}
     if not queues:
         return
@@ -644,8 +654,8 @@ def preflight_workloads(config: RuntimeConfig, objects: list[dict]) -> None:
             )
         requested = set().union(
             *(
-                _lws_request_resources(workload)
-                for workload in lws_objects
+                _workload_request_resources(workload)
+                for workload in workloads
                 if workload["metadata"].get("labels", {}).get(KUEUE_QUEUE_LABEL)
                 == queue
             )
