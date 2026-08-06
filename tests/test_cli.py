@@ -541,6 +541,36 @@ def test_render_cli_accelerator_override_changes_cache_architecture(capsys):
     assert "/jit-cache/b200/cu13/" in rendered
 
 
+def test_render_cli_accelerator_override_replaces_incompatible_model_pin(
+    tmp_path, capsys
+):
+    data = yaml.safe_load(STANDALONE_MODEL.read_text())
+    data["accelerator"] = "h200"
+    model = tmp_path / "pinned-h200.yaml"
+    model.write_text(yaml.safe_dump(data))
+
+    rc = main(
+        [
+            "render",
+            "manifest",
+            str(model),
+            "--cluster",
+            str(CLUSTER),
+            "--namespace",
+            "workload-ns",
+            "--user",
+            "tester",
+            "--gpu",
+            "b200",
+        ]
+    )
+
+    assert rc == 0
+    rendered = capsys.readouterr().out
+    assert "--gpu b200" in rendered
+    assert "/jit-cache/b200/cu13/" in rendered
+
+
 def test_accelerator_cli_alias_remains_supported(capsys):
     rc = main(
         [

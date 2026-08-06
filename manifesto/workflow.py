@@ -393,7 +393,11 @@ def render_manifest(
     cluster: Cluster | None = None,
 ) -> str:
     cluster = cluster or load_runtime_cluster(config, args)
-    spec = load_spec(resolve_model(args.spec), cluster)
+    spec = load_spec(
+        resolve_model(args.spec),
+        cluster,
+        accelerator=getattr(args, "accelerator", None),
+    )
     apply_runtime_overrides(spec, args, config)
     return render_to_yaml(
         render(spec, user=config.user, cluster=cluster, routing_only=routing_only),

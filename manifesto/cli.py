@@ -64,7 +64,11 @@ def _explain(args: argparse.Namespace) -> int:
 
     config = RuntimeConfig.from_args(args)
     cluster = load_runtime_cluster(config, args)
-    spec = load_spec(resolve_model(args.spec), cluster)
+    spec = load_spec(
+        resolve_model(args.spec),
+        cluster,
+        accelerator=getattr(args, "accelerator", None),
+    )
     apply_runtime_overrides(spec, args, config)
     instance = Instance(user=config.user, release=spec.release)
     roles = []
@@ -368,9 +372,7 @@ def _config_validate(args: argparse.Namespace) -> int:
         return 0
 
     model_path = resolve_model(args.spec)
-    spec = load_spec(model_path, cluster)
-    if args.accelerator:
-        spec.accelerator = args.accelerator
+    spec = load_spec(model_path, cluster, accelerator=args.accelerator)
     objects = render(spec, user=resolve_user(args.user), cluster=cluster)
     print(f"Valid cluster: {Path(cluster_path).resolve()}")
     print(f"Valid model:   {Path(model_path).resolve()}")

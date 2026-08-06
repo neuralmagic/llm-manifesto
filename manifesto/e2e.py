@@ -103,7 +103,11 @@ def _preflight(
     config: workflow.RuntimeConfig,
     cluster: Cluster,
 ) -> DeploymentSpec:
-    spec = load_spec(workflow.resolve_model(args.spec), cluster)
+    spec = load_spec(
+        workflow.resolve_model(args.spec),
+        cluster,
+        accelerator=getattr(args, "accelerator", None),
+    )
     workflow.apply_runtime_overrides(spec, args, config)
     objects = render(spec, user=config.user, cluster=cluster)
     if not spec.runtime.vllm_env and (
@@ -331,7 +335,11 @@ def e2e(args: argparse.Namespace) -> int:
     run_args.namespace = namespace
     config = workflow.RuntimeConfig.from_args(run_args)
     configured_cluster = workflow.load_runtime_cluster(config, run_args)
-    configured_spec = load_spec(workflow.resolve_model(run_args.spec), configured_cluster)
+    configured_spec = load_spec(
+        workflow.resolve_model(run_args.spec),
+        configured_cluster,
+        accelerator=getattr(run_args, "accelerator", None),
+    )
     use_external_env = (
         run_args.vllm_env is not None or configured_spec.runtime.vllm_env is not None
     )
