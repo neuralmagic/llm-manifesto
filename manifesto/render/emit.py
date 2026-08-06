@@ -38,8 +38,18 @@ def _literal_multiline_strings(value):
     return value
 
 
-def render(spec: DeploymentSpec, *, user: str, cluster: Cluster, routing_only: bool = False) -> list[dict]:
-    instance = Instance(user=user, release=spec.release)
+def render(
+    spec: DeploymentSpec,
+    *,
+    user: str,
+    cluster: Cluster,
+    routing_only: bool = False,
+) -> list[dict]:
+    instance = Instance(
+        user=user,
+        release=spec.release,
+        include_user_in_name=cluster.naming.user_prefix,
+    )
     if routing_only:
         return render_routing(spec, instance, cluster)
 

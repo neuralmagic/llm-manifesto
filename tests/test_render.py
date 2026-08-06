@@ -159,9 +159,9 @@ def test_idle_shutdown_is_enabled_by_default_for_45_minutes():
     assert workloads[-1]["name"].endswith("idle-shutdown")
     assert all(workload["replicas"] == 1 for workload in workloads)
     assert {workload["name"] for workload in workloads[:-1]} == {
-        "tester-vllm-ep8-decode",
-        "tester-vllm-ep8-prefill",
-        "tester-wide-ep-1p-ep8-1d-ep8-infpool-epp",
+        "vllm-ep8-decode",
+        "vllm-ep8-prefill",
+        "wide-ep-1p-ep8-1d-ep8-infpool-epp",
     }
     assert targets["decode"]["worker_indices"] is None
     assert targets["prefill"]["worker_indices"] is None
@@ -169,7 +169,7 @@ def test_idle_shutdown_is_enabled_by_default_for_45_minutes():
     assert role["rules"][-1] == {
         "apiGroups": ["leaderworkerset.x-k8s.io"],
         "resources": ["leaderworkersets"],
-        "resourceNames": ["tester-vllm-ep8-decode", "tester-vllm-ep8-prefill"],
+        "resourceNames": ["vllm-ep8-decode", "vllm-ep8-prefill"],
         "verbs": ["get", "patch"],
     }
     compile(
@@ -343,7 +343,7 @@ def test_dp_ports_feed_container_readiness_and_inferencepool():
     assert container["startupProbe"]["httpGet"]["port"] == "dp-supervisor"
     assert infpool["apiVersion"] == "inference.networking.k8s.io/v1"
     assert infpool["spec"]["targetPorts"] == [{"number": 8000}, {"number": 8001}, {"number": 8002}, {"number": 8003}]
-    assert infpool["spec"]["endpointPickerRef"]["name"] == "tester-wide-ep-1p-ep8-1d-ep8-infpool-epp"
+    assert infpool["spec"]["endpointPickerRef"]["name"] == "wide-ep-1p-ep8-1d-ep8-infpool-epp"
     script = container["args"][0]
     assert "DP_SIZE=8" in script
     assert "DP_SIZE=$((LWS_GROUP_SIZE * DP_SIZE_LOCAL))" not in script
@@ -449,10 +449,10 @@ def test_deepseek_lws_uses_short_workload_names_with_full_instance_labels():
     decode = _find(objects, "LeaderWorkerSet", "decode")
     prefill = _find(objects, "LeaderWorkerSet", "prefill")
 
-    assert decode["metadata"]["name"] == "tester-vllm-ep8-decode"
-    assert prefill["metadata"]["name"] == "tester-vllm-ep8-prefill"
-    assert decode["metadata"]["labels"]["app.kubernetes.io/instance"] == "tester-wide-ep-1p-ep8-1d-ep8"
-    assert prefill["metadata"]["labels"]["app.kubernetes.io/instance"] == "tester-wide-ep-1p-ep8-1d-ep8"
+    assert decode["metadata"]["name"] == "vllm-ep8-decode"
+    assert prefill["metadata"]["name"] == "vllm-ep8-prefill"
+    assert decode["metadata"]["labels"]["app.kubernetes.io/instance"] == "wide-ep-1p-ep8-1d-ep8"
+    assert prefill["metadata"]["labels"]["app.kubernetes.io/instance"] == "wide-ep-1p-ep8-1d-ep8"
 
 
 def test_deepseek_ep16_decode_name_keeps_decode_width():
@@ -461,8 +461,8 @@ def test_deepseek_ep16_decode_name_keeps_decode_width():
     decode = _find(objects, "LeaderWorkerSet", "decode")
     prefill = _find(objects, "LeaderWorkerSet", "prefill")
 
-    assert decode["metadata"]["name"] == "tester-vllm-ep16-decode"
-    assert prefill["metadata"]["name"] == "tester-vllm-ep8-prefill"
+    assert decode["metadata"]["name"] == "vllm-ep16-decode"
+    assert prefill["metadata"]["name"] == "vllm-ep8-prefill"
 
 
 def test_logs_persist_to_cluster_log_root():
@@ -538,7 +538,7 @@ def test_no_dp_qwen_uses_single_port_and_no_dp_flags():
     assert not any(obj["kind"] == "LeaderWorkerSet" for obj in objects)
     assert deployment["spec"]["replicas"] == 2
     assert deployment["spec"]["selector"]["matchLabels"] == {
-        "app.kubernetes.io/instance": "tester-qwen",
+        "app.kubernetes.io/instance": "qwen",
         "llm-d.ai/role": "decode",
     }
     assert deployment["spec"]["template"]["metadata"]["labels"].items() >= deployment["spec"]["selector"][
@@ -623,7 +623,7 @@ def test_pd_inferencepool_selector_includes_prefill_and_decode_roles():
     infpool = _find(objects, "InferencePool")
 
     selector = infpool["spec"]["selector"]["matchLabels"]
-    assert selector["app.kubernetes.io/instance"] == "tester-wide-ep-1p-ep8-1d-ep8"
+    assert selector["app.kubernetes.io/instance"] == "wide-ep-1p-ep8-1d-ep8"
     assert selector["llm-d.ai/deployment"] == "pd"
     assert selector["llm-d.ai/inferenceServing"] == "true"
     assert "llm-d.ai/role" not in selector
@@ -827,7 +827,7 @@ def test_non_pd_inferencepool_selector_targets_decode_role():
     infpool = _find(objects, "InferencePool")
 
     selector = infpool["spec"]["selector"]["matchLabels"]
-    assert selector["app.kubernetes.io/instance"] == "tester-qwen"
+    assert selector["app.kubernetes.io/instance"] == "qwen"
     assert selector["llm-d.ai/role"] == "decode"
 
 
@@ -847,7 +847,7 @@ def test_epp_uses_current_config_file_flag():
 
     assert container["image"] == DEFAULT_IMAGES.get("llm_d.epp", release=DEFAULT_IMAGES.get("llm_d.release"))
     assert "--config-file=/etc/epp/plugins.yaml" in args
-    assert "--pool-name=tester-wide-ep-1p-ep8-1d-ep8-infpool" in args
+    assert "--pool-name=wide-ep-1p-ep8-1d-ep8-infpool" in args
     assert "--pool-namespace=default" in args
     assert not any(arg.startswith("--plugins-config-file") for arg in args)
 

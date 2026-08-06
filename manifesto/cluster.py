@@ -173,6 +173,12 @@ class GatewayConfig(BaseModel):
     service_type: str = "ClusterIP"
 
 
+class NamingConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_prefix: bool = False
+
+
 class FabricProfileConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -269,6 +275,7 @@ class Cluster(BaseModel):
     gpus_per_node: int = Field(ge=1)
     accelerators: AcceleratorsConfig
     platform: Literal["kubernetes", "openshift"] = "kubernetes"
+    naming: NamingConfig = Field(default_factory=NamingConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)

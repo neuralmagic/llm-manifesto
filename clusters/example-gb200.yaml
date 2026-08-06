@@ -5,6 +5,10 @@
 name: example-gb200
 gpus_per_node: 4
 
+# Uncomment when users share release names in a namespace.
+# naming:
+#   user_prefix: true
+
 accelerators:
   default: gb200
   profiles:

@@ -125,7 +125,7 @@ class RuntimeConfig:
         )
         render_out = Path(
             getattr(args, "output", None)
-            or os.environ.get("MANIFESTO_RENDER_OUT", f"/tmp/{user}-manifesto.yaml")
+            or os.environ.get("MANIFESTO_RENDER_OUT", "/tmp/manifesto.yaml")
         )
         return cls(
             user=user,
@@ -978,7 +978,15 @@ def stop(args) -> int:
     resources: list[LiveResource] | None = None
     if args.spec:
         spec = load_spec(resolve_model(args.spec))
-        instance_id = Instance(user=config.user, release=spec.release).instance_id
+        cluster_path = getattr(args, "cluster", None) or os.environ.get("MANIFESTO_CLUSTER")
+        include_user_in_name = (
+            load_cluster(resolve_cluster(cluster_path)).naming.user_prefix if cluster_path else False
+        )
+        instance_id = Instance(
+            user=config.user,
+            release=spec.release,
+            include_user_in_name=include_user_in_name,
+        ).instance_id
     elif args.instance:
         instance_id = args.instance
     else:
@@ -1144,14 +1152,21 @@ def ready(
     cluster: Cluster | None = None,
 ) -> int:
     config = config or RuntimeConfig.from_args(args, require_cluster=False)
+    if cluster is None and config.cluster_path:
+        cluster = load_runtime_cluster(config, args)
     spec = load_spec(resolve_model(args.spec), cluster)
-    instance = Instance(user=config.user, release=spec.release)
-    epp = instance.name("infpool-epp")
     routing_enabled = spec.routing.kind != RoutingKind.DISABLED
+    if routing_enabled and cluster is None:
+        cluster = load_runtime_cluster(config, args)
+    instance = Instance(
+        user=config.user,
+        release=spec.release,
+        include_user_in_name=cluster.naming.user_prefix if cluster else False,
+    )
+    epp = instance.name("infpool-epp")
 
     gateway = ""
     if routing_enabled:
-        cluster = cluster or load_runtime_cluster(config, args)
         gateway_name = instance.name("gateway", max_length=63 - len(cluster.gateway.class_name) - 1)
         gateway = f"{gateway_name}-{cluster.gateway.class_name}"
 

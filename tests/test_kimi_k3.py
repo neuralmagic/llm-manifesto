@@ -67,7 +67,7 @@ def test_kimi_k3_rendered_pods_request_full_gb200_nodes():
     ][0]
     assert clique_term["topologyKey"] == "nvidia.com/gpu.clique"
     assert clique_term["labelSelector"]["matchLabels"] == {
-        "app.kubernetes.io/instance": "tester-kimi-k3-aggregated-tp16-ep16",
+        "app.kubernetes.io/instance": "kimi-k3-aggregated-tp16-ep16",
         "llm-d.ai/role": "decode",
     }
     # Co-location is per LWS group, not per role, so replicas stay independent.
@@ -266,11 +266,11 @@ def test_kimi_k3_pd_clique_affinity_is_scoped_per_role():
 
     # Each role packs into one NVLink domain...
     assert terms["prefill"]["labelSelector"]["matchLabels"] == {
-        "app.kubernetes.io/instance": "tester-kimi-k3-1p-1d-dp4tp4",
+        "app.kubernetes.io/instance": "kimi-k3-1p-1d-dp4tp4",
         "llm-d.ai/role": "prefill",
     }
     assert terms["decode"]["labelSelector"]["matchLabels"] == {
-        "app.kubernetes.io/instance": "tester-kimi-k3-1p-1d-dp4tp4",
+        "app.kubernetes.io/instance": "kimi-k3-1p-1d-dp4tp4",
         "llm-d.ai/role": "decode",
     }
     # ...but PD roles exchange KV over RDMA, so they must not be forced to

@@ -192,7 +192,11 @@ def _probe_url(
     cluster: Cluster,
     spec: DeploymentSpec,
 ) -> str:
-    instance = Instance(user=config.user, release=spec.release)
+    instance = Instance(
+        user=config.user,
+        release=spec.release,
+        include_user_in_name=cluster.naming.user_prefix,
+    )
     if spec.routing.kind == RoutingKind.DISABLED:
         role = next((item for item in spec.roles if item.name == "decode"), spec.roles[0])
         port = resolve_role(spec, instance, cluster, role).ports.public[0]
@@ -259,7 +263,11 @@ def run_probe(
     cluster: Cluster,
     spec: DeploymentSpec,
 ) -> int:
-    instance = Instance(user=config.user, release=spec.release)
+    instance = Instance(
+        user=config.user,
+        release=spec.release,
+        include_user_in_name=cluster.naming.user_prefix,
+    )
     url = _probe_url(config, cluster, spec)
     job_name = instance.name("e2e")
     job = render_probe_job(
@@ -328,13 +336,19 @@ def e2e(args: argparse.Namespace) -> int:
 
     workflow.load_dotenv()
     user = workflow.resolve_user(args.user)
-    namespace = args.namespace or Instance(user=user, release="e2e").name(
+    cluster_path = workflow.resolve_cluster(args.cluster, context=args.context)
+    configured_cluster = workflow.load_cluster_with_overrides(cluster_path, args)
+    namespace = args.namespace or Instance(
+        user=user,
+        release="e2e",
+        include_user_in_name=configured_cluster.naming.user_prefix,
+    ).name(
         f"ns-{uuid.uuid4().hex[:8]}"
     )
     run_args = argparse.Namespace(**vars(args))
     run_args.namespace = namespace
+    run_args.cluster = cluster_path
     config = workflow.RuntimeConfig.from_args(run_args)
-    configured_cluster = workflow.load_runtime_cluster(config, run_args)
     configured_spec = load_spec(
         workflow.resolve_model(run_args.spec),
         configured_cluster,

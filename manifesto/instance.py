@@ -28,6 +28,7 @@ def _truncate_hash(value: str, limit: int = DNS_LABEL_MAX) -> str:
 class Instance:
     user: str
     release: str
+    include_user_in_name: bool = False
 
     @property
     def user_slug(self) -> str:
@@ -39,6 +40,8 @@ class Instance:
 
     @property
     def instance_id(self) -> str:
+        if not self.include_user_in_name:
+            return _truncate_hash(self.release_slug)
         return _truncate_hash(f"{self.user_slug}-{self.release_slug}")
 
     def name(self, component: str, *, hostname_safe: bool = True, max_length: int | None = None) -> str:
@@ -49,6 +52,8 @@ class Instance:
 
     def user_scoped_name(self, component: str, *, hostname_safe: bool = True) -> str:
         limit = DNS_LABEL_MAX if hostname_safe else 253
+        if not self.include_user_in_name:
+            return _truncate_hash(_slug(component), limit)
         return _truncate_hash(f"{self.user_slug}-{_slug(component)}", limit)
 
     def labels(self, component: str | None = None, role: str | None = None) -> dict[str, str]:

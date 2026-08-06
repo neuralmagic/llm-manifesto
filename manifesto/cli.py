@@ -70,7 +70,11 @@ def _explain(args: argparse.Namespace) -> int:
         accelerator=getattr(args, "accelerator", None),
     )
     apply_runtime_overrides(spec, args, config)
-    instance = Instance(user=config.user, release=spec.release)
+    instance = Instance(
+        user=config.user,
+        release=spec.release,
+        include_user_in_name=cluster.naming.user_prefix,
+    )
     roles = []
     for role in spec.roles:
         resolved = resolve_role(spec, instance, cluster, role)
@@ -493,8 +497,12 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_context_arg(stop_parser)
     stop_parser.add_argument("--namespace")
     stop_parser.add_argument("--user")
+    stop_parser.add_argument(
+        "--cluster",
+        help="cluster profile (needed when naming.user_prefix is enabled)",
+    )
     # Retain legacy render flags as accepted no-ops now that stop discovers live state.
-    for legacy_flag in ("--cluster", "--user-root", "--log-root", "--cache-root"):
+    for legacy_flag in ("--user-root", "--log-root", "--cache-root"):
         stop_parser.add_argument(legacy_flag, help=argparse.SUPPRESS)
     stop_parser.add_argument("--pre-launch", action="append", default=[], help=argparse.SUPPRESS)
     stop_parser.add_argument("--now", action="store_true")
