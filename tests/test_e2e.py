@@ -30,7 +30,7 @@ def test_e2e_runs_in_cluster_job_against_routed_gateway(monkeypatch):
     def fake_capture(cmd, **_kwargs):
         if cmd[:3] == ["kubectl", "get", "namespace/workload-ns"]:
             return ""
-        if "job/tester-qwen-e2e" in cmd:
+        if "job/qwen-e2e" in cmd:
             return json.dumps({"status": {"succeeded": 1}})
         raise AssertionError(cmd)
 
@@ -83,7 +83,7 @@ def test_e2e_runs_in_cluster_job_against_routed_gateway(monkeypatch):
         {
             "name": "MANIFESTO_E2E_URL",
             "value": (
-                "http://tester-qwen-gateway-istio.workload-ns.svc.cluster.local:80/v1"
+                "http://qwen-gateway-istio.workload-ns.svc.cluster.local:80/v1"
             ),
         },
         {"name": "MANIFESTO_E2E_TIMEOUT", "value": "300"},
@@ -91,10 +91,10 @@ def test_e2e_runs_in_cluster_job_against_routed_gateway(monkeypatch):
     assert "/models" in container["command"][2]
     assert "/completions" in container["command"][2]
     assert "except urllib.error.URLError" in container["command"][2]
-    assert calls[2][0][-2:] == ["logs", "job/tester-qwen-e2e"]
+    assert calls[2][0][-2:] == ["logs", "job/qwen-e2e"]
     assert calls[3][0][-3:] == [
         "delete",
-        "job/tester-qwen-e2e",
+        "job/qwen-e2e",
         "--ignore-not-found=true",
     ]
     assert calls[4][0] == [
@@ -153,7 +153,7 @@ def test_e2e_can_use_external_env_with_cluster_storage_and_keep_namespace(monkey
     assert lifecycle == ["deploy"]
     job = yaml.safe_load(calls[1][1])
     assert job["spec"]["template"]["spec"]["containers"][0]["env"][0]["value"] == (
-        "http://tester-qwen3-0-6b-decode-svc.workload-ns.svc.cluster.local:8000/v1"
+        "http://qwen3-0-6b-decode-svc.workload-ns.svc.cluster.local:8000/v1"
     )
     assert not any("namespace/workload-ns" in cmd for cmd, _ in calls[2:])
 

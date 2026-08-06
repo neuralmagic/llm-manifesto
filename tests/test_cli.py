@@ -91,6 +91,18 @@ def test_user_config_catalog_resolves_models_and_clusters(monkeypatch, tmp_path)
     assert resolve_cluster("local") == str(cluster)
 
 
+def test_default_workflow_file_name_omits_user(monkeypatch):
+    monkeypatch.delenv("MANIFESTO_RENDER_OUT", raising=False)
+    monkeypatch.setenv("MANIFESTO_NAMESPACE", "workload-ns")
+
+    config = workflow.RuntimeConfig.from_args(
+        SimpleNamespace(user="tester", namespace=None, output=None, context=None, cluster=None),
+        require_cluster=False,
+    )
+
+    assert config.render_out == Path("/tmp/manifesto.yaml")
+
+
 def test_model_catalog_name_with_dot_resolves_without_yaml_suffix(monkeypatch, tmp_path):
     user_config = tmp_path / "manifesto-config"
     model = user_config / "models" / "qwen" / "qwen3-0.6b.yaml"
@@ -176,6 +188,58 @@ def test_render_accepts_user_catalog_names(monkeypatch, tmp_path, capsys):
 
     assert rc == 0
     assert "kind: Deployment" in capsys.readouterr().out
+
+
+def test_render_omits_user_from_generated_names_by_default(capsys):
+    rc = main(
+        [
+            "render",
+            "manifest",
+            str(STANDALONE_MODEL),
+            "--cluster",
+            str(CLUSTER),
+            "--namespace",
+            "test",
+            "--user",
+            "tester",
+        ]
+    )
+
+    assert rc == 0
+    rendered = capsys.readouterr().out
+    objects = list(yaml.safe_load_all(rendered))
+    labels = [obj["metadata"]["labels"] for obj in objects if "labels" in obj["metadata"]]
+    assert labels
+    assert all(label["app.kubernetes.io/instance"] == "qwen" for label in labels)
+    assert all(label["llm-d.ai/owner"] == "tester" for label in labels)
+    assert "--user tester" in rendered
+
+
+def test_cluster_can_enable_user_prefixed_names(tmp_path, capsys):
+    profile = yaml.safe_load(CLUSTER.read_text())
+    profile["naming"] = {"user_prefix": True}
+    cluster_path = tmp_path / "user-prefixed.yaml"
+    cluster_path.write_text(yaml.safe_dump(profile))
+
+    rc = main(
+        [
+            "render",
+            "manifest",
+            str(STANDALONE_MODEL),
+            "--cluster",
+            str(cluster_path),
+            "--namespace",
+            "test",
+            "--user",
+            "tester",
+        ]
+    )
+
+    assert rc == 0
+    objects = list(yaml.safe_load_all(capsys.readouterr().out))
+    labels = [obj["metadata"]["labels"] for obj in objects if "labels" in obj["metadata"]]
+    assert labels
+    assert all(label["app.kubernetes.io/instance"] == "tester-qwen" for label in labels)
 
 
 def test_explain_reports_features_without_polluting_rendered_yaml(capsys):
@@ -955,6 +1019,7 @@ def test_ready_waits_for_spec_roles_only(monkeypatch, tmp_path):
 
     assert rc == 0
     joined = [" ".join(cmd) for cmd in popen_cmds]
+    assert any("app.kubernetes.io/instance=smoke" in cmd for cmd in joined)
     assert any("llm-d.ai/role=decode" in cmd for cmd in joined)
     assert not any("llm-d.ai/role=prefill" in cmd for cmd in joined)
     # Routing is disabled, so no endpoint picker wait is issued.
@@ -1096,11 +1161,11 @@ def test_stop_spec_discovers_live_state_without_cluster_profile(monkeypatch, cap
     objects = [
         _live_object(
             "Deployment",
-            "tester-wide-ep-1p-ep8-1d-ep8-decode",
-            "tester-wide-ep-1p-ep8-1d-ep8",
+            "wide-ep-1p-ep8-1d-ep8-decode",
+            "wide-ep-1p-ep8-1d-ep8",
             api_version="apps/v1",
         ),
-        _live_object("Pod", "decode-0", "tester-wide-ep-1p-ep8-1d-ep8", ready=True),
+        _live_object("Pod", "decode-0", "wide-ep-1p-ep8-1d-ep8", ready=True),
     ]
     _mock_discovery(monkeypatch, [objects, [], []])
     calls = []
@@ -1117,10 +1182,48 @@ def test_stop_spec_discovers_live_state_without_cluster_profile(monkeypatch, cap
         "-n",
         "workload-ns",
         "delete",
-        "deployments.apps/tester-wide-ep-1p-ep8-1d-ep8-decode",
+        "deployments.apps/wide-ep-1p-ep8-1d-ep8-decode",
         "--ignore-not-found=true",
     ]]
-    assert "Stopped tester-wide-ep-1p-ep8-1d-ep8." in capsys.readouterr().out
+    assert "Stopped wide-ep-1p-ep8-1d-ep8." in capsys.readouterr().out
+
+
+def test_stop_spec_honors_cluster_user_prefix(monkeypatch, tmp_path):
+    profile = yaml.safe_load(CLUSTER.read_text())
+    profile["naming"] = {"user_prefix": True}
+    cluster_path = tmp_path / "user-prefixed.yaml"
+    cluster_path.write_text(yaml.safe_dump(profile))
+    seen = {}
+
+    def fake_discover(_config, *, instance_id=None, **_kwargs):
+        seen["discovered"] = instance_id
+        return []
+
+    def fake_delete(_config, instance_id, resources, *, now):
+        seen["deleted"] = (instance_id, resources, now)
+        return 0
+
+    monkeypatch.setattr(workflow, "discover_live_resources", fake_discover)
+    monkeypatch.setattr(workflow, "delete_instance", fake_delete)
+
+    rc = main(
+        [
+            "stop",
+            str(MODEL),
+            "--cluster",
+            str(cluster_path),
+            "--namespace",
+            "workload-ns",
+            "--user",
+            "tester",
+        ]
+    )
+
+    assert rc == 0
+    assert seen == {
+        "discovered": "tester-wide-ep-1p-ep8-1d-ep8",
+        "deleted": ("tester-wide-ep-1p-ep8-1d-ep8", [], False),
+    }
 
 
 def test_stop_instance_is_idempotent(monkeypatch, capsys):

@@ -70,7 +70,7 @@ Render to a file, edit it, diff it, then apply it:
 
 ```bash
 manifesto render file models/deepseek-v4/1P-EP8-1D-EP8.yaml
-$EDITOR /tmp/$USER-manifesto.yaml
+$EDITOR /tmp/manifesto.yaml
 manifesto file diff
 manifesto file apply
 ```
@@ -589,7 +589,7 @@ what will be deployed:
 
 ```bash
 manifesto render file models/deepseek-v4/1P-EP8-1D-EP8.yaml
-$EDITOR /tmp/$USER-manifesto.yaml
+$EDITOR /tmp/manifesto.yaml
 manifesto file diff
 manifesto file apply
 ```
@@ -695,15 +695,21 @@ to choose its name (the command refuses an existing namespace),
 change the inference deadline, or `--image` to use a mirrored Python image.
 `HF_TOKEN` and a cluster profile are required, as with normal deployments.
 
-Every rendered object is scoped by the instance identity:
+Every rendered object is scoped by the release-based instance identity:
 
 ```text
-{user}-{release}
+{release}
 ```
 
-Names, labels, selectors, and cache paths all derive from that identity so
-multiple users can share the same namespace without cross-routing through each
-other's pods.
+Names, labels, and selectors derive from that identity. User-scoped storage
+paths and the `llm-d.ai/owner` label still retain the user. Deployments must have
+unique release names within a namespace. Clusters whose users share release
+names can enable user-prefixed identities in their profile:
+
+```yaml
+naming:
+  user_prefix: true
+```
 
 ## External vLLM Environments
 

@@ -4,7 +4,11 @@ from manifesto.instance import Instance
 
 
 def test_names_are_prefixed_and_hostname_safe():
-    instance = Instance(user="Very.Long_User.Name", release="release-with-a-name-that-is-far-too-long-for-hostnames")
+    instance = Instance(
+        user="Very.Long_User.Name",
+        release="release-with-a-name-that-is-far-too-long-for-hostnames",
+        include_user_in_name=True,
+    )
     name = instance.name("decode-with-another-long-component-name")
 
     assert name.startswith(instance.instance_id[:20])
@@ -12,16 +16,29 @@ def test_names_are_prefixed_and_hostname_safe():
 
 
 def test_user_scoped_names_can_omit_release_slug():
-    instance = Instance(user="Tester.Name", release="wide-ep-1p-ep8-1d-ep8")
+    instance = Instance(
+        user="Tester.Name",
+        release="wide-ep-1p-ep8-1d-ep8",
+        include_user_in_name=True,
+    )
 
     assert instance.user_scoped_name("vllm-ep8-prefill") == "tester-name-vllm-ep8-prefill"
 
 
 def test_selectors_are_disjoint_across_instances():
-    a = Instance(user="alice", release="wide-ep")
-    b = Instance(user="bob", release="wide-ep")
+    a = Instance(user="alice", release="wide-ep", include_user_in_name=True)
+    b = Instance(user="bob", release="wide-ep", include_user_in_name=True)
 
     selector = a.pod_selector("decode")
     b_labels = b.labels("model-server", "decode")
 
     assert any(b_labels.get(key) != value for key, value in selector.items())
+
+
+def test_names_can_omit_user_without_removing_owner_identity():
+    instance = Instance(user="Tester.Name", release="wide-ep")
+
+    assert instance.instance_id == "wide-ep"
+    assert instance.name("decode") == "wide-ep-decode"
+    assert instance.user_scoped_name("vllm-ep8-decode") == "vllm-ep8-decode"
+    assert instance.labels()["llm-d.ai/owner"] == "tester-name"
