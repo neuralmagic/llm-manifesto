@@ -102,6 +102,15 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
     if resolved.persistent_cache and spec.cache.cleanup_on_crash:
         container_env.append(field_ref_env("MANIFESTO_POD_UID", "metadata.uid"))
 
+    vllm_requests = {
+        "cpu": role.resources.cpu,
+        "memory": role.resources.memory,
+    }
+    vllm_limits = {"memory": role.resources.memory}
+    if role.resources.gpus > 0:
+        vllm_requests[accelerator.resource_name] = str(role.resources.gpus)
+        vllm_limits[accelerator.resource_name] = str(role.resources.gpus)
+
     vllm_container = {
         "name": "vllm",
         "image": spec.model.image,
@@ -125,15 +134,8 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
         "env": container_env,
         "ports": container_ports,
         "resources": {
-            "requests": {
-                "cpu": role.resources.cpu,
-                "memory": role.resources.memory,
-                accelerator.resource_name: str(role.resources.gpus),
-            },
-            "limits": {
-                "memory": role.resources.memory,
-                accelerator.resource_name: str(role.resources.gpus),
-            },
+            "requests": vllm_requests,
+            "limits": vllm_limits,
         },
         "volumeMounts": cluster.volume_mounts(),
     }
@@ -319,7 +321,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
         "llm-d.ai/model": spec.model.label_value,
         "llm-d.ai/deployment": spec.topology.value,
     }
-    if cluster.kueue.local_queue:
+    if cluster.kueue.local_queue and role.resources.gpus > 0:
         workload_labels[KUEUE_QUEUE_LABEL] = cluster.kueue.local_queue
 
     return {

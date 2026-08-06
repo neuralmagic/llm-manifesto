@@ -456,6 +456,20 @@ Omitting `kueue` preserves the normal Deployment/LeaderWorkerSet selection.
 CPU-only supporting resources, including the in-cluster end-to-end probe Job,
 do not receive Kueue metadata or suspension.
 
+Before applying a queued workload, `manifesto deploy` verifies that the
+LeaderWorkerSet and Kueue APIs are served, the selected LocalQueue is
+`Active=True`, and its referenced ClusterQueue is `Active=True`. It also prints
+every init-container and container request in each rendered LWS PodSet so quota
+requirements are visible before mutation, and rejects request resource names
+that the ClusterQueue does not cover.
+
+Changing queue admission is intentionally a recreate operation. Enabling,
+changing, or disabling a queue on an existing LeaderWorkerSet deletes it before
+applying the replacement, and moving a same-named role between Deployment and
+LeaderWorkerSet likewise deletes the obsolete controller first. These
+transitions interrupt serving; use a distinct release name for a parallel,
+zero-downtime rollout.
+
 The workflow CLI requires a cluster profile for commands that render a spec. Set
 `MANIFESTO_CLUSTER` directly, pass `--cluster`, or set `MANIFESTO_CLUSTER_MAP` in
 `.env` as a local lookup table keyed by kube context or kube cluster name:

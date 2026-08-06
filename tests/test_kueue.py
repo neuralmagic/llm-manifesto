@@ -179,6 +179,24 @@ def test_queue_metadata_is_omitted_from_non_lws_resources():
         assert KUEUE_QUEUE_LABEL not in template_labels
 
 
+def test_zero_gpu_native_lws_is_unqueued_and_omits_accelerator_resources():
+    cluster = load_cluster(CLUSTER_PATH)
+    cluster.kueue.local_queue = QUEUE
+    spec = load_spec(ROOT / "models" / "kimi-k3/aggregated-tp16-ep16.yaml", cluster)
+    spec.role("decode").resources.gpus = 0
+    objects = render(spec, user="tester", cluster=cluster)
+    lws = next(obj for obj in objects if obj["kind"] == "LeaderWorkerSet")
+    vllm = next(
+        container
+        for container in _lws_pod_spec(lws)["containers"]
+        if container["name"] == "vllm"
+    )
+
+    assert KUEUE_QUEUE_LABEL not in lws["metadata"]["labels"]
+    assert "nvidia.com/gpu" not in vllm["resources"]["requests"]
+    assert "nvidia.com/gpu" not in vllm["resources"]["limits"]
+
+
 def test_cpu_only_probe_job_is_not_queued_or_suspended():
     cluster = load_cluster(CLUSTER_PATH)
     cluster.kueue.local_queue = QUEUE
@@ -200,7 +218,15 @@ def test_cpu_only_probe_job_is_not_queued_or_suspended():
 
 @pytest.mark.parametrize(
     "queue",
-    ["", "-bad", "bad-", "contains/slash", "x" * 64],
+    [
+        "",
+        "-bad",
+        "bad-",
+        "contains/slash",
+        "UPPERCASE",
+        "under_score",
+        "x" * 64,
+    ],
 )
 def test_local_queue_must_be_a_kubernetes_label_value(queue):
     with pytest.raises(ValidationError, match="kueue.local_queue"):

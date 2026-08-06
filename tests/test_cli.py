@@ -715,6 +715,8 @@ def test_deploy_pipes_rendered_manifest_to_kubectl(monkeypatch):
     monkeypatch.setenv("USER", "tester")
     monkeypatch.setenv("HF_TOKEN", "hf_read_test")
     monkeypatch.setattr(workflow, "run", fake_run)
+    monkeypatch.setattr(workflow, "preflight_workloads", lambda *_: None)
+    monkeypatch.setattr(workflow, "plan_workload_transitions", lambda *_: [])
 
     rc = main(["deploy", str(MODEL), "--vllm-env", "/mnt/shared/tester/vllm-envs/feature"])
 
@@ -739,6 +741,8 @@ def test_deploy_honors_context_and_idle_timeout(monkeypatch):
     monkeypatch.setenv("MANIFESTO_CLUSTER", str(CLUSTER))
     monkeypatch.setenv("HF_TOKEN", "hf_read_test")
     monkeypatch.setattr(workflow, "run", fake_run)
+    monkeypatch.setattr(workflow, "preflight_workloads", lambda *_: None)
+    monkeypatch.setattr(workflow, "plan_workload_transitions", lambda *_: [])
 
     rc = main(
         [

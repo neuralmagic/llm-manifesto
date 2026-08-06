@@ -251,16 +251,14 @@ class KueueConfig(BaseModel):
     def require_label_value(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        if not re.fullmatch(
-            r"(?:[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)?",
+        if len(value) > 63 or not re.fullmatch(
+            r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?",
             value,
         ):
             raise ValueError(
-                "kueue.local_queue must be a valid Kubernetes label value "
+                "kueue.local_queue must be a lowercase DNS-1123 label "
                 "with at most 63 characters"
             )
-        if not value:
-            raise ValueError("kueue.local_queue must not be empty")
         return value
 
 
