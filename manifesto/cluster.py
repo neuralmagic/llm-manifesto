@@ -7,6 +7,7 @@ falling back to defaults.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -238,6 +239,29 @@ class OpenShiftConfig(BaseModel):
     scc: str | None = None
 
 
+class KueueConfig(BaseModel):
+    """Optional LocalQueue used to admit GPU serving workloads."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    local_queue: str | None = None
+
+    @field_validator("local_queue")
+    @classmethod
+    def require_label_value(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if len(value) > 63 or not re.fullmatch(
+            r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?",
+            value,
+        ):
+            raise ValueError(
+                "kueue.local_queue must be a lowercase DNS-1123 label "
+                "with at most 63 characters"
+            )
+        return value
+
+
 class Cluster(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -256,6 +280,7 @@ class Cluster(BaseModel):
     fabric: FabricConfig
     llm_d: LlmdConfig = Field(default_factory=LlmdConfig)
     openshift: OpenShiftConfig = Field(default_factory=OpenShiftConfig)
+    kueue: KueueConfig = Field(default_factory=KueueConfig)
 
     @model_validator(mode="after")
     def default_hf_home(self) -> "Cluster":

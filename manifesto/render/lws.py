@@ -20,6 +20,7 @@ ACTIVE_PORTS_ANNOTATION = "inference.networking.k8s.io/active-ports"
 # LWS stamps this on the leader and every worker of a group; the value is a hash
 # of the leader's namespaced name, so it is unique per replica cluster-wide.
 LWS_GROUP_KEY_LABEL = "leaderworkerset.sigs.k8s.io/group-key"
+KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
 
 
 def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, role: RoleSpec) -> dict:
@@ -90,6 +91,15 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
     if resolved.persistent_cache and spec.cache.cleanup_on_crash:
         container_env.append(field_ref_env("MANIFESTO_POD_UID", "metadata.uid"))
 
+    vllm_requests = {
+        "cpu": role.resources.cpu,
+        "memory": role.resources.memory,
+    }
+    vllm_limits = {"memory": role.resources.memory}
+    if role.resources.gpus > 0:
+        vllm_requests[accelerator.resource_name] = str(role.resources.gpus)
+        vllm_limits[accelerator.resource_name] = str(role.resources.gpus)
+
     vllm_container = {
         "name": "vllm",
         "image": spec.model.image,
@@ -113,15 +123,8 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
         "env": container_env,
         "ports": container_ports,
         "resources": {
-            "requests": {
-                "cpu": role.resources.cpu,
-                "memory": role.resources.memory,
-                accelerator.resource_name: str(role.resources.gpus),
-            },
-            "limits": {
-                "memory": role.resources.memory,
-                accelerator.resource_name: str(role.resources.gpus),
-            },
+            "requests": vllm_requests,
+            "limits": vllm_limits,
         },
         "volumeMounts": cluster.volume_mounts(),
     }
@@ -281,12 +284,19 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
 
     if resolved.features.workload_kind == WorkloadKind.DEPLOYMENT:
         selector = instance.pod_selector(role.name)
+        workload_labels = instance.labels("model-server", role.name)
+        deployment_pod_metadata = copy.deepcopy(pod_metadata)
+        if cluster.kueue.local_queue and role.resources.gpus > 0:
+            workload_labels[KUEUE_QUEUE_LABEL] = cluster.kueue.local_queue
+            deployment_pod_metadata["labels"][KUEUE_QUEUE_LABEL] = (
+                cluster.kueue.local_queue
+            )
         return {
             "apiVersion": "apps/v1",
             "kind": "Deployment",
             "metadata": {
                 "name": workload_name,
-                "labels": instance.labels("model-server", role.name),
+                "labels": workload_labels,
             },
             "spec": {
                 "replicas": role.lws.replicas,
@@ -296,23 +306,26 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
                     "rollingUpdate": {"maxSurge": 0, "maxUnavailable": "100%"},
                 },
                 "template": {
-                    "metadata": pod_metadata,
+                    "metadata": deployment_pod_metadata,
                     "spec": pod_spec,
                 },
             },
         }
+
+    workload_labels = instance.labels("lws", role.name) | {
+        "llm-d.ai/inferenceServing": "true",
+        "llm-d.ai/model": spec.model.label_value,
+        "llm-d.ai/deployment": spec.topology.value,
+    }
+    if cluster.kueue.local_queue and role.resources.gpus > 0:
+        workload_labels[KUEUE_QUEUE_LABEL] = cluster.kueue.local_queue
 
     return {
         "apiVersion": "leaderworkerset.x-k8s.io/v1",
         "kind": "LeaderWorkerSet",
         "metadata": {
             "name": workload_name,
-            "labels": instance.labels("lws", role.name)
-            | {
-                "llm-d.ai/inferenceServing": "true",
-                "llm-d.ai/model": spec.model.label_value,
-                "llm-d.ai/deployment": spec.topology.value,
-            },
+            "labels": workload_labels,
         },
         "spec": {
             "replicas": role.lws.replicas,

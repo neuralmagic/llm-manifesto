@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
+
 from .cluster import Cluster, load_cluster
 from .catalog import ROOT, catalog_entries, config_home, resolve_catalog_path
 from .instance import Instance
@@ -27,6 +29,14 @@ from .spec import EppSpec, RoutingKind, load_spec
 
 HF_SECRET_NAME = "hf-secret"
 HF_SECRET_KEY = "HF_TOKEN"
+KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
+LWS_RESOURCE_TYPE = "leaderworkersets.leaderworkerset.x-k8s.io"
+KUEUE_REQUIRED_RESOURCE_TYPES = {
+    "localqueues.kueue.x-k8s.io",
+    "clusterqueues.kueue.x-k8s.io",
+    "resourceflavors.kueue.x-k8s.io",
+    "workloads.kueue.x-k8s.io",
+}
 # Stateless teardown allowlist. Keep this in sync with the label-bearing objects
 # emitted by manifesto.render. Values are kubectl resource names as reported by
 # ``kubectl api-resources -o name``.
@@ -448,10 +458,306 @@ def deploy(
     config = config or RuntimeConfig.from_args(args)
     manifest = render_manifest(args, config, routing_only=routing_only, cluster=cluster)
     if not routing_only:
+        require_hf_token()
+        objects = parse_manifest(manifest)
+        preflight_workloads(config, objects)
+        transitions = plan_workload_transitions(config, objects)
         rc = sync_hf_secret(config)
         if rc:
             return rc
+        rc = execute_workload_transitions(config, transitions)
+        if rc:
+            return rc
     return run([*config.kubectl(), "apply", "-f", "-"], input_text=manifest)
+
+
+def parse_manifest(manifest: str) -> list[dict]:
+    try:
+        return [obj for obj in yaml.safe_load_all(manifest) if obj]
+    except yaml.YAMLError as exc:
+        raise WorkflowError(f"rendered manifest is invalid YAML: {exc}") from exc
+
+
+def _model_workloads(objects: list[dict]) -> list[dict]:
+    workloads = []
+    for obj in objects:
+        if obj.get("kind") not in {"Deployment", "LeaderWorkerSet"}:
+            continue
+        labels = obj.get("metadata", {}).get("labels", {})
+        if (
+            labels.get("llm-d.ai/inferenceServing") == "true"
+            or labels.get("app.kubernetes.io/component") == "model-server"
+        ):
+            workloads.append(obj)
+    return workloads
+
+
+def _api_resources(config: RuntimeConfig, group: str) -> set[str]:
+    raw = capture(
+        [
+            *config.kubectl_base(),
+            "api-resources",
+            f"--api-group={group}",
+            "-o",
+            "name",
+        ]
+    )
+    return set(raw.splitlines())
+
+
+def _condition_active(resource: dict) -> bool:
+    return any(
+        condition.get("type") == "Active" and condition.get("status") == "True"
+        for condition in resource.get("status", {}).get("conditions", [])
+    )
+
+
+def _get_json(cmd: list[str], description: str) -> dict:
+    try:
+        raw = capture(cmd)
+        resource = json.loads(raw)
+    except (WorkflowError, json.JSONDecodeError) as exc:
+        raise WorkflowError(f"Kueue preflight failed: cannot read {description}: {exc}") from exc
+    if not isinstance(resource, dict) or not resource:
+        raise WorkflowError(f"Kueue preflight failed: {description} was not found")
+    return resource
+
+
+def _format_requests(requests: dict) -> str:
+    if not requests:
+        return "none"
+    return ", ".join(f"{name}={value}" for name, value in sorted(requests.items()))
+
+
+def _workload_pod_templates(workload: dict) -> list[tuple[str, dict]]:
+    if workload["kind"] == "Deployment":
+        return [("pod", workload["spec"]["template"])]
+    template = workload["spec"]["leaderWorkerTemplate"]
+    pod_templates = [("worker", template["workerTemplate"])]
+    if "leaderTemplate" in template:
+        pod_templates.append(("leader", template["leaderTemplate"]))
+    return pod_templates
+
+
+def _surface_workload_requests(workload: dict) -> None:
+    name = workload["metadata"]["name"]
+    replicas = workload["spec"].get("replicas", 1)
+    size = (
+        workload["spec"]["leaderWorkerTemplate"].get("size", 1)
+        if workload["kind"] == "LeaderWorkerSet"
+        else 1
+    )
+    queue = workload["metadata"].get("labels", {}).get(KUEUE_QUEUE_LABEL, "unmanaged")
+    print(
+        f"Kueue preflight {workload['kind']}/{name}: queue={queue}, replicas={replicas}, "
+        f"pods-per-replica={size}",
+        file=sys.stderr,
+    )
+    for pod_set, pod_template in _workload_pod_templates(workload):
+        pod_spec = pod_template.get("spec", {})
+        for field in ("resources", "overhead"):
+            values = pod_spec.get(field, {})
+            requests = values.get("requests", {}) if field == "resources" else values
+            if requests:
+                print(
+                    f"  {pod_set}/pod/{field}: requests={_format_requests(requests)}",
+                    file=sys.stderr,
+                )
+        for container_kind in ("initContainers", "containers"):
+            for container in pod_spec.get(container_kind, []):
+                print(
+                    f"  {pod_set}/{container_kind}/{container.get('name', 'unnamed')}: "
+                    f"requests={_format_requests(container.get('resources', {}).get('requests', {}))}",
+                    file=sys.stderr,
+                )
+
+
+def _workload_request_resources(workload: dict) -> set[str]:
+    resources: set[str] = set()
+    for _, pod_template in _workload_pod_templates(workload):
+        pod_spec = pod_template.get("spec", {})
+        resources.update(pod_spec.get("resources", {}).get("requests", {}))
+        resources.update(pod_spec.get("overhead", {}))
+        for container_kind in ("initContainers", "containers"):
+            for container in pod_spec.get(container_kind, []):
+                resources.update(container.get("resources", {}).get("requests", {}))
+    return resources
+
+
+def _cluster_queue_covered_resources(cluster_queue: dict) -> set[str]:
+    covered: set[str] = set()
+    for group in cluster_queue.get("spec", {}).get("resourceGroups", []):
+        covered.update(group.get("coveredResources", []))
+    return covered
+
+
+def preflight_workloads(config: RuntimeConfig, objects: list[dict]) -> None:
+    workloads = _model_workloads(objects)
+    if not workloads:
+        return
+    lws_objects = [obj for obj in workloads if obj["kind"] == "LeaderWorkerSet"]
+    if lws_objects:
+        served = _api_resources(config, "leaderworkerset.x-k8s.io")
+        if LWS_RESOURCE_TYPE not in served:
+            raise WorkflowError(
+                "workload preflight failed: LeaderWorkerSet API is not served "
+                f"({LWS_RESOURCE_TYPE})"
+            )
+
+    for workload in workloads:
+        _surface_workload_requests(workload)
+    queues = {
+        obj["metadata"].get("labels", {}).get(KUEUE_QUEUE_LABEL)
+        for obj in workloads
+    } - {None}
+    if not queues:
+        return
+
+    kueue_resources = _api_resources(config, "kueue.x-k8s.io")
+    missing = KUEUE_REQUIRED_RESOURCE_TYPES - kueue_resources
+    if missing:
+        raise WorkflowError(
+            "Kueue preflight failed: required APIs are not served: "
+            + ", ".join(sorted(missing))
+        )
+    for queue in sorted(queues):
+        local_queue = _get_json(
+            [*config.kubectl(), "get", "localqueue", queue, "-o", "json"],
+            f"LocalQueue {config.namespace}/{queue}",
+        )
+        if not _condition_active(local_queue):
+            raise WorkflowError(
+                f"Kueue preflight failed: LocalQueue {config.namespace}/{queue} "
+                "is not Active=True"
+            )
+        cluster_queue_name = local_queue.get("spec", {}).get("clusterQueue")
+        if not cluster_queue_name:
+            raise WorkflowError(
+                f"Kueue preflight failed: LocalQueue {config.namespace}/{queue} "
+                "does not reference a ClusterQueue"
+            )
+        cluster_queue = _get_json(
+            [
+                *config.kubectl_base(),
+                "get",
+                "clusterqueue",
+                cluster_queue_name,
+                "-o",
+                "json",
+            ],
+            f"ClusterQueue {cluster_queue_name}",
+        )
+        if not _condition_active(cluster_queue):
+            raise WorkflowError(
+                f"Kueue preflight failed: ClusterQueue {cluster_queue_name} "
+                "is not Active=True"
+            )
+        requested = set().union(
+            *(
+                _workload_request_resources(workload)
+                for workload in workloads
+                if workload["metadata"].get("labels", {}).get(KUEUE_QUEUE_LABEL)
+                == queue
+            )
+        )
+        uncovered = requested - _cluster_queue_covered_resources(cluster_queue)
+        if uncovered:
+            raise WorkflowError(
+                f"Kueue preflight failed: ClusterQueue {cluster_queue_name} does "
+                "not cover rendered PodSet resources: "
+                + ", ".join(sorted(uncovered))
+            )
+
+
+@dataclass(frozen=True)
+class WorkloadTransition:
+    resource_type: str
+    name: str
+    reason: str
+
+
+def _live_named_resource(
+    config: RuntimeConfig,
+    resource_type: str,
+    name: str,
+) -> dict | None:
+    raw = capture(
+        [
+            *config.kubectl(),
+            "get",
+            resource_type,
+            name,
+            "-o",
+            "json",
+            "--ignore-not-found",
+        ],
+        tolerate=MISSING_RESOURCE_ERRORS,
+    )
+    if not raw.strip():
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise WorkflowError(
+            f"kubectl returned invalid JSON for {resource_type}/{name}: {exc}"
+        ) from exc
+
+
+def plan_workload_transitions(
+    config: RuntimeConfig,
+    objects: list[dict],
+) -> list[WorkloadTransition]:
+    transitions: list[WorkloadTransition] = []
+    for desired in _model_workloads(objects):
+        name = desired["metadata"]["name"]
+        desired_kind = desired["kind"]
+        deployment = _live_named_resource(config, "deployments.apps", name)
+        lws = _live_named_resource(config, LWS_RESOURCE_TYPE, name)
+        if desired_kind == "LeaderWorkerSet":
+            if deployment is not None:
+                transitions.append(
+                    WorkloadTransition("deployments.apps", name, "Deployment to LeaderWorkerSet")
+                )
+            if lws is not None:
+                desired_queue = desired["metadata"].get("labels", {}).get(KUEUE_QUEUE_LABEL)
+                live_queue = lws.get("metadata", {}).get("labels", {}).get(KUEUE_QUEUE_LABEL)
+                if live_queue != desired_queue:
+                    transitions.append(
+                        WorkloadTransition(
+                            LWS_RESOURCE_TYPE,
+                            name,
+                            f"queue changed from {live_queue or 'unmanaged'} "
+                            f"to {desired_queue or 'unmanaged'}",
+                        )
+                    )
+        elif lws is not None:
+            transitions.append(
+                WorkloadTransition(LWS_RESOURCE_TYPE, name, "LeaderWorkerSet to Deployment")
+            )
+    return transitions
+
+
+def execute_workload_transitions(
+    config: RuntimeConfig,
+    transitions: list[WorkloadTransition],
+) -> int:
+    for transition in transitions:
+        print(
+            f"Recreating {transition.name}: {transition.reason}; serving will be interrupted.",
+            file=sys.stderr,
+        )
+        rc = run(
+            [
+                *config.kubectl(),
+                "delete",
+                f"{transition.resource_type}/{transition.name}",
+                "--ignore-not-found=true",
+                "--wait=true",
+            ]
+        )
+        if rc:
+            return rc
+    return 0
 
 
 def render_bootstrap_manifest(args, config: RuntimeConfig | None = None) -> str:
@@ -474,7 +780,7 @@ def bootstrap(args) -> int:
     )
 
 
-def sync_hf_secret(config: RuntimeConfig) -> int:
+def require_hf_token() -> str:
     token = os.environ.get(HF_SECRET_KEY, "").strip()
     if not token:
         raise WorkflowError(
@@ -482,6 +788,11 @@ def sync_hf_secret(config: RuntimeConfig) -> int:
             f"{config_home() / '.env'} or the environment before deploying.",
             code=2,
         )
+    return token
+
+
+def sync_hf_secret(config: RuntimeConfig) -> int:
+    token = require_hf_token()
     secret = {
         "apiVersion": "v1",
         "kind": "Secret",

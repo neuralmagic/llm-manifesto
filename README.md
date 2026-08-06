@@ -411,6 +411,7 @@ spec:
 - user, log, and cache path templates
 - llm-d release
 - UCX/NCCL/NVSHMEM/IMEX fabric env profiles
+- optional Kueue LocalQueue selection for GPU LeaderWorkerSets
 
 When a role omits `resources.cpu` or `resources.memory`, Manifesto scales the
 request from the role's inferred GPUs per pod and the cluster policy:
@@ -435,6 +436,45 @@ model_server_resources:
 Explicit role resource values always win. If allocatable capacity is set,
 rendering warns when the number of role pods that fit by GPU would exceed the
 node's aggregate CPU or memory capacity.
+
+### Kueue admission
+
+GPU roles can be admitted through a Kueue LocalQueue selected in the cluster
+profile:
+
+```yaml
+kueue:
+  local_queue: example-gpu-queue
+```
+
+When configured, Manifesto preserves each role's native workload kind. A
+single-node role remains a Deployment and receives
+`kueue.x-k8s.io/queue-name` on both the Deployment and its pod template. Each
+Deployment pod is therefore admitted independently. A role whose topology
+requires a LeaderWorkerSet receives the queue label on the LeaderWorkerSet,
+whose complete leader/worker group is admitted atomically. The queue is
+cluster- and namespace-specific operational configuration, so it belongs in
+the private cluster profile rather than a shareable model spec. Omitting
+`kueue` preserves the same workload kinds without admission metadata.
+CPU-only supporting resources, including the in-cluster end-to-end probe Job,
+do not receive Kueue metadata or suspension.
+
+Before applying a queued workload, `manifesto deploy` verifies that the Kueue
+APIs are served, the selected LocalQueue is
+`Active=True`, and its referenced ClusterQueue is `Active=True`. It also prints
+every init-container and container request in each rendered workload pod
+template so quota requirements are visible before mutation, and rejects
+request resource names that the ClusterQueue does not cover. Deployments do not
+require the LeaderWorkerSet API; native LeaderWorkerSets are checked for it.
+
+Changing queue admission on an existing LeaderWorkerSet is intentionally a
+recreate operation because its admitted group is atomic. Enabling, changing,
+or disabling its queue deletes it before applying the replacement. Deployment
+queue changes use the Deployment rollout and replace independently admitted
+pods without changing workload kind. Moving a same-named role between native
+Deployment and LeaderWorkerSet shapes deletes the obsolete controller first.
+LWS recreation and kind transitions interrupt serving; use a distinct release
+name for a parallel, zero-downtime rollout.
 
 The workflow CLI requires a cluster profile for commands that render a spec. Set
 `MANIFESTO_CLUSTER` directly, pass `--cluster`, or set `MANIFESTO_CLUSTER_MAP` in

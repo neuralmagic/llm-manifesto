@@ -38,6 +38,10 @@ model_server_resources:
   cpu_per_gpu: "8"
   memory_per_gpu: 128Gi
 
+# Opt GPU serving workloads into a namespace LocalQueue by declaring, for example:
+# kueue:
+#   local_queue: example-gpu-queue
+
 paths:
   user_root: /mnt/shared/{user}
   cache_root: /mnt/shared/{user}/jit-cache/{gpu_arch}/{cuda}/{cache_key}/{release}
