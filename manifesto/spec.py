@@ -481,10 +481,17 @@ def _safe_cache_key(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-") or "latest"
 
 
-def load_spec(path: str | Path, cluster: Cluster | None = None) -> DeploymentSpec:
+def load_spec(
+    path: str | Path,
+    cluster: Cluster | None = None,
+    *,
+    accelerator: str | None = None,
+) -> DeploymentSpec:
     data = load_spec_data(path)
     data = apply_image_refs(data)
     spec = DeploymentSpec.model_validate(data)
+    if accelerator is not None:
+        spec.accelerator = accelerator
     if cluster is not None:
         spec.apply_cluster_defaults(cluster)
     return spec
