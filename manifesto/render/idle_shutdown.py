@@ -1,4 +1,4 @@
-"""Instance-wide idle detector that scales Manifesto workloads to zero."""
+"""Instance-wide idle detector that releases Manifesto serving resources."""
 
 from __future__ import annotations
 
@@ -12,12 +12,14 @@ from ..instance import Instance
 from ..parallelism import parallel_layout
 from ..resolve import resolve_role
 from ..spec import DeploymentSpec, RoutingKind
+from .routing import gateway_name
 
 
 IDLE_SHUTDOWN_SCRIPT = r'''import json
 import os
 import ssl
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -31,6 +33,8 @@ EXPECTED_TARGETS = int(os.environ["EXPECTED_TARGETS"])
 TIMEOUT_SECONDS = int(os.environ["TIMEOUT_SECONDS"])
 POLL_SECONDS = 60
 WORKLOADS = json.loads(os.environ["WORKLOADS"])
+GATEWAY = json.loads(os.environ["GATEWAY"])
+CONTROLLER = json.loads(os.environ["CONTROLLER"])
 
 CONTEXT = ssl.create_default_context(cafile=CA_PATH)
 
@@ -46,7 +50,11 @@ def api_request(path, *, method="GET", body=None):
         headers={
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
-            "Content-Type": "application/merge-patch+json",
+            "Content-Type": (
+                "application/merge-patch+json"
+                if method == "PATCH"
+                else "application/json"
+            ),
         },
     )
     with urllib.request.urlopen(request, context=CONTEXT, timeout=15) as response:
@@ -110,30 +118,68 @@ def scrape_activity(targets):
     return completed, running, recognized
 
 
-def scale_to_zero():
+def patch_replicas(workload, replicas):
+    api_request(
+        workload["path"],
+        method="PATCH",
+        body={"spec": {"replicas": replicas}},
+    )
+
+
+def restore_workloads(workloads):
+    for workload in reversed(workloads):
+        try:
+            patch_replicas(workload, workload["replicas"])
+            print(
+                f"restored {workload['name']} to {workload['replicas']} replicas",
+                flush=True,
+            )
+        except Exception as rollback_error:
+            print(
+                f"failed to restore {workload['name']}: {rollback_error}",
+                flush=True,
+            )
+
+
+def delete_gateway():
+    if GATEWAY is None:
+        return
+    try:
+        api_request(GATEWAY["path"], method="DELETE")
+        print(f"deleted {GATEWAY['name']}", flush=True)
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+        print(f"{GATEWAY['name']} was already deleted", flush=True)
+
+
+def stop_controller(*, retry):
+    while True:
+        try:
+            patch_replicas(CONTROLLER, 0)
+            print(f"scaled {CONTROLLER['name']} to zero", flush=True)
+            return
+        except Exception as error:
+            if not retry:
+                raise
+            print(
+                f"failed to stop {CONTROLLER['name']}: {error}; retrying",
+                flush=True,
+            )
+            time.sleep(POLL_SECONDS)
+
+
+def shut_down():
     scaled = []
     try:
         for workload in WORKLOADS:
-            api_request(workload["path"], method="PATCH", body={"spec": {"replicas": 0}})
+            patch_replicas(workload, 0)
             scaled.append(workload)
             print(f"scaled {workload['name']} to zero", flush=True)
+        delete_gateway()
+        stop_controller(retry=GATEWAY is not None)
     except Exception:
-        for workload in reversed(scaled):
-            try:
-                api_request(
-                    workload["path"],
-                    method="PATCH",
-                    body={"spec": {"replicas": workload["replicas"]}},
-                )
-                print(
-                    f"restored {workload['name']} to {workload['replicas']} replicas",
-                    flush=True,
-                )
-            except Exception as rollback_error:
-                print(
-                    f"failed to restore {workload['name']}: {rollback_error}",
-                    flush=True,
-                )
+        restore_workloads(scaled)
         raise
 
 
@@ -154,7 +200,7 @@ while True:
             last_activity = time.monotonic()
         previous_completed = completed
         if time.monotonic() - last_activity >= TIMEOUT_SECONDS:
-            scale_to_zero()
+            shut_down()
             break
     except Exception as error:
         # Fail open: API, network, and metric-format failures must never tear down
@@ -233,6 +279,7 @@ def render_idle_shutdown(
                 }
             )
     workloads = model_workloads
+    gateway: dict[str, str] | None = None
     if spec.routing.kind != RoutingKind.DISABLED:
         epp_name = instance.name("infpool-epp")
         deployment_names.append(epp_name)
@@ -247,10 +294,17 @@ def render_idle_shutdown(
                 ),
             }
         )
+        gateway_resource_name = gateway_name(instance, cluster)
+        gateway = {
+            "name": gateway_resource_name,
+            "path": (
+                f"/apis/gateway.networking.k8s.io/v1/namespaces/"
+                f"{spec.namespace}/gateways/{gateway_resource_name}"
+            ),
+        }
 
     controller_path = f"/apis/apps/v1/namespaces/{spec.namespace}/deployments/{name}"
-    # Stop the detector last. Re-applying the manifest restores every desired replica count.
-    workloads.append({"name": name, "path": controller_path, "replicas": 1})
+    controller = {"name": name, "path": controller_path, "replicas": 1}
 
     rules.append(
         {
@@ -274,6 +328,15 @@ def render_idle_shutdown(
                 "resources": ["leaderworkersets"],
                 "resourceNames": lws_names,
                 "verbs": ["get", "patch"],
+            }
+        )
+    if gateway is not None:
+        rules.append(
+            {
+                "apiGroups": ["gateway.networking.k8s.io"],
+                "resources": ["gateways"],
+                "resourceNames": [gateway["name"]],
+                "verbs": ["delete"],
             }
         )
 
@@ -357,6 +420,14 @@ def render_idle_shutdown(
                                     {
                                         "name": "WORKLOADS",
                                         "value": json.dumps(workloads, separators=(",", ":")),
+                                    },
+                                    {
+                                        "name": "GATEWAY",
+                                        "value": json.dumps(gateway, separators=(",", ":")),
+                                    },
+                                    {
+                                        "name": "CONTROLLER",
+                                        "value": json.dumps(controller, separators=(",", ":")),
                                     },
                                 ],
                                 "resources": {

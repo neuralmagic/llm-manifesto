@@ -339,9 +339,10 @@ role before normal schema validation.
 Every deployment includes an idle-shutdown controller by default. Once all
 expected vLLM API servers are ready, it watches request counters and running or
 queued requests across all roles. After 45 idle minutes it scales the model
-workloads, endpoint picker, and itself to zero. Applying or deploying the spec
-again restores their declared replica counts. Change the timeout or opt out in
-the runtime configuration:
+workloads and endpoint picker to zero, deletes the instance Gateway so its
+platform-managed proxy replicas are released, and scales itself to zero.
+Applying or deploying the spec again restores all of those resources. Change
+the timeout or opt out in the runtime configuration:
 
 ```yaml
 runtime:

@@ -24,6 +24,7 @@ from .instance import Instance
 from .overrides import load_routing_profile
 from .render import render, render_to_yaml
 from .render.bootstrap import render_bootstrap
+from .render.routing import gateway_name as routing_gateway_name
 from .spec import EppSpec, RoutingKind, load_spec
 
 
@@ -1167,8 +1168,7 @@ def ready(
 
     gateway = ""
     if routing_enabled:
-        gateway_name = instance.name("gateway", max_length=63 - len(cluster.gateway.class_name) - 1)
-        gateway = f"{gateway_name}-{cluster.gateway.class_name}"
+        gateway = f"{routing_gateway_name(instance, cluster)}-{cluster.gateway.class_name}"
 
     print("Waiting for model pods and endpoint picker...")
     waits = [
