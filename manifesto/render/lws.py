@@ -44,6 +44,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
 
     containers, extra_volumes = sidecars(
         spec.runtime.sidecars,
+        platform=cluster.platform,
         dcgm_config_name=instance.name("dcgm-metrics"),
     )
     volumes = cluster.base_volumes()

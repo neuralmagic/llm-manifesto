@@ -550,8 +550,11 @@ outside Manifesto should omit `shared_claim`.
 
 Set `platform: openshift` for OpenShift clusters. This adds a stable `USER`
 fallback for Python libraries when containers run under an arbitrary UID,
-without affecting standard Kubernetes profiles. An SCC can be granted to each
-release-specific model service account:
+without affecting standard Kubernetes profiles. It also omits the
+`node-exporter` sidecar because its `/sys` and `/proc` `hostPath` volumes are
+incompatible with OpenShift's restricted SCC; `dcgm-exporter` remains enabled
+when requested. An SCC can be granted to each release-specific model service
+account:
 
 ```yaml
 openshift:

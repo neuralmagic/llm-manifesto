@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from ..images import DEFAULT_IMAGES
 
 
-def sidecars(names: list[str], *, dcgm_config_name: str = "dcgm-custom-metrics") -> tuple[list[dict], list[dict]]:
+def sidecars(
+    names: list[str],
+    *,
+    platform: Literal["kubernetes", "openshift"],
+    dcgm_config_name: str = "dcgm-custom-metrics",
+) -> tuple[list[dict], list[dict]]:
     containers: list[dict] = []
     volumes: list[dict] = []
     if "dcgm-exporter" in names:
@@ -42,7 +49,10 @@ def sidecars(names: list[str], *, dcgm_config_name: str = "dcgm-custom-metrics")
                 "securityContext": {"allowPrivilegeEscalation": False},
             }
         )
-    if "node-exporter" in names:
+    # OpenShift's restricted SCC rejects the hostPath volumes node-exporter
+    # needs for /sys and /proc. Node-level metrics should come from the
+    # platform's monitoring stack instead.
+    if "node-exporter" in names and platform != "openshift":
         volumes.extend([
             {"name": "sys", "hostPath": {"path": "/sys", "type": "Directory"}},
             {"name": "proc", "hostPath": {"path": "/proc", "type": "Directory"}},
