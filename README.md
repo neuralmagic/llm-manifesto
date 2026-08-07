@@ -423,6 +423,8 @@ accelerators:
     gb200:
       resource_name: nvidia.com/gpu
       presence_label: nvidia.com/gpu.present
+      # Optional when the resource name alone does not select this GPU class.
+      node_selector: {gpu.product: GB200}
       gpu_arch: gb200
       torch_cuda_arch_list: "10.0+PTX"
 
@@ -436,6 +438,41 @@ model_server_resources:
 Explicit role resource values always win. If allocatable capacity is set,
 rendering warns when the number of role pods that fit by GPU would exceed the
 node's aggregate CPU or memory capacity.
+
+### Reusing cluster workload settings
+
+Controllers that submit other GPU workloads can reuse the cluster-owned part
+of a Manifesto profile without depending on model topology or routing:
+
+```python
+from manifesto.cluster import load_cluster
+from manifesto.workload import workload_settings
+
+settings = workload_settings(load_cluster("clusters/my-cluster.yaml"))
+accelerator = settings.accelerator("gb200")
+```
+
+The portable projection contains only accelerator resource names and node
+selectors, the default Kueue LocalQueue, and pod placement defaults such as
+affinity, tolerations, DNS, annotations, and image pull policy. Storage,
+model-server resources, fabric configuration, and launch settings remain part
+of Manifesto's serving-specific cluster model.
+
+Manifesto also owns a controller-neutral workload IR and its Kubernetes object
+lowering. This lets tools describe a pod template and lifecycle policy while
+Manifesto consistently applies cluster placement and Kueue metadata:
+
+```bash
+manifesto render workload examples/non-indexed-job.yaml \
+  --cluster clusters/my-cluster.yaml \
+  --accelerator gb200
+```
+
+The `job` backend emits an ordinary, non-indexed `batch/v1` Job. It never adds
+`completionMode`, `completions`, or `parallelism`. A workload may optionally
+declare a normal or headless Service. The same IR currently lowers Deployment
+and LeaderWorkerSet backends; Grove is reserved as an extension point until its
+rendering contract is implemented.
 
 ### Kueue admission
 

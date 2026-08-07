@@ -13,6 +13,16 @@ from ..launch import build_launch_script
 from ..parallelism import parallel_layout
 from ..resolve import resolve_role
 from ..spec import DeploymentSpec, RoleSpec
+from ..workload import (
+    KUEUE_QUEUE_LABEL as KUEUE_QUEUE_LABEL,
+    DeploymentPolicy,
+    LeaderWorkerSetPolicy,
+    PodTemplate,
+    Workload,
+    WorkloadBackend,
+    WorkloadMetadata,
+    render_workload as render_controller_workload,
+)
 
 # Endpoint-picker hint listing which InferencePool target ports a pod really serves.
 ACTIVE_PORTS_ANNOTATION = "inference.networking.k8s.io/active-ports"
@@ -20,7 +30,6 @@ ACTIVE_PORTS_ANNOTATION = "inference.networking.k8s.io/active-ports"
 # LWS stamps this on the leader and every worker of a group; the value is a hash
 # of the leader's namespaced name, so it is unique per replica cluster-wide.
 LWS_GROUP_KEY_LABEL = "leaderworkerset.sigs.k8s.io/group-key"
-KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
 
 
 def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, role: RoleSpec) -> dict:
@@ -216,6 +225,8 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
         pod_metadata["annotations"] = annotations
 
     pod_spec = {"volumes": volumes, "containers": [vllm_container, *containers]}
+    if accelerator.node_selector:
+        pod_spec["nodeSelector"] = dict(accelerator.node_selector)
     if cluster.openshift.scc:
         pod_spec["serviceAccountName"] = instance.name("model-server")
     if cluster.pod_defaults.termination_grace_period_seconds is not None:
@@ -284,61 +295,55 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
 
     if resolved.features.workload_kind == WorkloadKind.DEPLOYMENT:
         selector = instance.pod_selector(role.name)
-        workload_labels = instance.labels("model-server", role.name)
-        deployment_pod_metadata = copy.deepcopy(pod_metadata)
-        if cluster.kueue.local_queue and role.resources.gpus > 0:
-            workload_labels[KUEUE_QUEUE_LABEL] = cluster.kueue.local_queue
-            deployment_pod_metadata["labels"][KUEUE_QUEUE_LABEL] = (
-                cluster.kueue.local_queue
-            )
-        return {
-            "apiVersion": "apps/v1",
-            "kind": "Deployment",
-            "metadata": {
-                "name": workload_name,
-                "labels": workload_labels,
-            },
-            "spec": {
-                "replicas": role.lws.replicas,
-                "selector": {"matchLabels": selector},
-                "strategy": {
+        workload = Workload(
+            name=workload_name,
+            backend=WorkloadBackend.DEPLOYMENT,
+            metadata=WorkloadMetadata(
+                labels=instance.labels("model-server", role.name)
+            ),
+            pod_template=PodTemplate(
+                metadata=WorkloadMetadata(**copy.deepcopy(pod_metadata)),
+                spec=pod_spec,
+            ),
+            selector=selector,
+            queue_name=(
+                cluster.kueue.local_queue if role.resources.gpus > 0 else None
+            ),
+            deployment=DeploymentPolicy(
+                replicas=role.lws.replicas,
+                strategy={
                     "type": "RollingUpdate",
                     "rollingUpdate": {"maxSurge": 0, "maxUnavailable": "100%"},
                 },
-                "template": {
-                    "metadata": deployment_pod_metadata,
-                    "spec": pod_spec,
-                },
-            },
-        }
+            ),
+        )
+        return render_controller_workload(workload)[0]
 
     workload_labels = instance.labels("lws", role.name) | {
         "llm-d.ai/inferenceServing": "true",
         "llm-d.ai/model": spec.model.label_value,
         "llm-d.ai/deployment": spec.topology.value,
     }
-    if cluster.kueue.local_queue and role.resources.gpus > 0:
-        workload_labels[KUEUE_QUEUE_LABEL] = cluster.kueue.local_queue
-
-    return {
-        "apiVersion": "leaderworkerset.x-k8s.io/v1",
-        "kind": "LeaderWorkerSet",
-        "metadata": {
-            "name": workload_name,
-            "labels": workload_labels,
-        },
-        "spec": {
-            "replicas": role.lws.replicas,
-            "rolloutStrategy": {
+    workload = Workload(
+        name=workload_name,
+        backend=WorkloadBackend.LEADER_WORKER_SET,
+        metadata=WorkloadMetadata(labels=workload_labels),
+        pod_template=PodTemplate(
+            metadata=WorkloadMetadata(**pod_metadata),
+            spec=pod_spec,
+        ),
+        queue_name=(
+            cluster.kueue.local_queue if role.resources.gpus > 0 else None
+        ),
+        leader_worker_set=LeaderWorkerSetPolicy(
+            replicas=role.lws.replicas,
+            size=role.lws.size,
+            rollout_strategy={
                 "type": "RollingUpdate",
-                "rollingUpdateConfiguration": {"maxUnavailable": "100%"},
-            },
-            "leaderWorkerTemplate": {
-                "size": role.lws.size,
-                "workerTemplate": {
-                    "metadata": pod_metadata,
-                    "spec": pod_spec,
+                "rollingUpdateConfiguration": {
+                    "maxUnavailable": "100%"
                 },
             },
-        },
-    }
+        ),
+    )
+    return render_controller_workload(workload)[0]
