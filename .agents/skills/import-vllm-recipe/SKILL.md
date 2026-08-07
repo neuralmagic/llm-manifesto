@@ -5,31 +5,42 @@ description: Import a recipes.vllm.ai deployment or upstream vLLM recipe YAML in
 
 # Import a vLLM recipe
 
-Translate recipe intent into Manifesto's declarative topology. Treat the recipe
-as an upstream source, the selected cluster profile as the hardware contract,
-and rendered Kubernetes YAML as the result to audit.
+Translate recipe intent into Manifesto's declarative topology. Keep the model
+spec and cluster profile as orthogonal inputs: the recipe supplies model and
+runtime intent, while a cluster profile may be supplied separately to validate
+or render that intent. Never derive cluster configuration into the model spec.
 
 ## Workflow
 
 1. Fetch the exact recipe URL and its linked upstream YAML. Record the selected
    hardware, strategy, node count, variant, and enabled features; query
    parameters may change the generated command without changing the YAML.
-2. Inspect the current Kubernetes context, its effective Manifesto cluster
-   profile, the closest model specs, and `config/images.yaml` before editing.
-3. Create a model spec under `models/<provider>/`. Reuse inheritance only when
-   the parent has the same model/runtime contracts; otherwise keep the import
-   self-contained and reviewable.
+2. Resolve the requested destination independently of any cluster. Use the
+   personal Manifesto catalog when requested; do not assume imports belong in
+   the repository. Inspect the closest model specs and `config/images.yaml`
+   only for model/runtime schema and conventions.
+3. Create the model spec in the requested model catalog. Reuse inheritance only
+   when the parent has the same model/runtime contracts and is visible from that
+   catalog; otherwise keep the import self-contained and portable.
 4. Map recipe settings using the rules below. Do not paste generated shell
    commands into `vllm_raw_args` when structured Manifesto fields exist.
-5. Validate, render, and audit the complete PodSpecs and routing objects.
+5. If a validation cluster is supplied, resolve it as a separate CLI input,
+   then validate, render, and audit the complete PodSpecs and routing objects.
 6. Add focused regression coverage when the import exercises a new topology or
    renderer behavior. Preserve unrelated worktree changes.
 
 ## Mapping rules
 
-- Resolve GPUs from the selected cluster profile, not the recipe site's default
-  hardware. A PD query such as `nodes=4` means four nodes in each pool unless
-  the page explicitly says otherwise: eight nodes total.
+- Derive topology from the exact recipe selection and explicit user intent, not
+  from a Manifesto cluster profile. Use a separately selected cluster profile
+  only to verify that the portable topology fits. A PD query such as `nodes=4`
+  means four nodes in each pool unless the page explicitly says otherwise:
+  eight nodes total.
+- Never copy cluster-owned values into a model spec. This includes Kubernetes
+  context, cluster name, node selectors, storage or cache paths, claims,
+  credentials, affinity, resource names, Kueue metadata, base fabric settings,
+  and namespace or user identity. Do not add `accelerator` merely because the
+  validation cluster has a default accelerator.
 - Express P/D with `topology: pd` and
   `routing: {kind: pd, target_role: decode}`. Manifesto supplies llm-d routing;
   do not copy `vllm-router` launch commands.
@@ -66,8 +77,10 @@ and rendered Kubernetes YAML as the result to audit.
 - Add a below-boundary recommendation absent from the selected recipe only when
   the user explicitly requests the deviation, then report it in the handoff.
 - Let the cluster profile own storage, affinity, resource claims, base fabric
-  settings, caches, and shared images. Keep recipe-specific model flags,
-  role-specific fabric overrides, and one-off images in the model spec.
+  settings, caches, and shared images. Keep recipe-selected model flags and
+  role-specific runtime overrides in the model spec even when the recipe chose
+  them for particular hardware; those are recipe provenance, not copied cluster
+  configuration.
 - Omit values already supplied by schema, topology, or cluster defaults. Common
   examples are derived model labels, default routing for the selected topology,
   default sidecars, `lws.replicas: 1`, `parallelism.tp: 1`, inferred resources,
@@ -82,7 +95,8 @@ and rendered Kubernetes YAML as the result to audit.
 
 ## Validation
 
-Use an explicit cluster, namespace, and user:
+Keep the model argument independent and pass an explicit cluster, namespace,
+and user only as validation/render inputs:
 
 ```bash
 uv run manifesto config validate MODEL --cluster CLUSTER
@@ -104,5 +118,6 @@ Run relevant tests after the render audit. Do not deploy unless the user asks.
 
 ## Handoff
 
-Report the source recipe, the effective cluster profile, the final topology,
+Report the source recipe, portable model destination, final topology,
 intentional deviations from the generated command, and validation results.
+Identify any validation cluster as external context, never as model content.
