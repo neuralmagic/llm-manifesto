@@ -258,6 +258,27 @@ def test_openshift_cluster_sets_stable_user_for_arbitrary_uid():
     assert resolved.env["USER"] == "vllm"
 
 
+def test_openshift_strips_node_exporter_sidecar_and_host_volumes():
+    cluster = CLUSTER.model_copy(update={"platform": "openshift"})
+    spec = load_spec(ROOT / "models" / "qwen" / "aggregated.yaml", cluster)
+    spec.runtime.sidecars = ["dcgm-exporter", "node-exporter"]
+
+    objects = render(spec, user="tester", cluster=cluster)
+    deployment = next(
+        obj
+        for obj in objects
+        if obj["kind"] == "Deployment" and obj["metadata"]["name"].endswith("decode")
+    )
+    pod_spec = deployment["spec"]["template"]["spec"]
+    container_names = {container["name"] for container in pod_spec["containers"]}
+    volume_names = {volume["name"] for volume in pod_spec["volumes"]}
+
+    assert "dcgm-exporter" in container_names
+    assert "node-exporter" not in container_names
+    assert "sys" not in volume_names
+    assert "proc" not in volume_names
+
+
 def test_pre_launch_hooks_run_before_rank_launch_setup():
     spec = load_spec(DEEPSEEK, CLUSTER)
     spec.runtime.pre_launch.append("echo runtime-hook")
