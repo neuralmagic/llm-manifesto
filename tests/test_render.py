@@ -60,6 +60,11 @@ def _idle_shutdown_functions(monkeypatch) -> dict:
     monkeypatch.setenv("EXPECTED_TARGETS", "0")
     monkeypatch.setenv("TIMEOUT_SECONDS", "2700")
     monkeypatch.setenv("WORKLOADS", "[]")
+    monkeypatch.setenv("GATEWAY", "null")
+    monkeypatch.setenv(
+        "CONTROLLER",
+        '{"name":"idle-shutdown","path":"/controller","replicas":1}',
+    )
     monkeypatch.setattr("ssl.create_default_context", lambda **_kwargs: None)
     definitions = IDLE_SHUTDOWN_SCRIPT.split("last_activity = time.monotonic()", 1)[0]
     namespace: dict = {}
@@ -151,26 +156,51 @@ def test_idle_shutdown_is_enabled_by_default_for_45_minutes():
     container = controller["spec"]["template"]["spec"]["containers"][0]
     env = {item["name"]: item for item in container["env"]}
     workloads = json.loads(env["WORKLOADS"]["value"])
+    gateway = json.loads(env["GATEWAY"]["value"])
+    shutdown_controller = json.loads(env["CONTROLLER"]["value"])
     targets = json.loads(env["TARGETS"]["value"])
 
     assert controller["spec"]["replicas"] == 1
     assert env["TIMEOUT_SECONDS"]["value"] == "2700"
     assert env["EXPECTED_TARGETS"]["value"] == "16"
-    assert workloads[-1]["name"].endswith("idle-shutdown")
     assert all(workload["replicas"] == 1 for workload in workloads)
-    assert {workload["name"] for workload in workloads[:-1]} == {
+    assert {workload["name"] for workload in workloads} == {
         "vllm-ep8-decode",
         "vllm-ep8-prefill",
         "wide-ep-1p-ep8-1d-ep8-infpool-epp",
     }
+    rendered_gateway = _find(objects, "Gateway")
+    assert gateway == {
+        "name": rendered_gateway["metadata"]["name"],
+        "path": (
+            "/apis/gateway.networking.k8s.io/v1/namespaces/"
+            f"default/gateways/{rendered_gateway['metadata']['name']}"
+        ),
+    }
+    assert shutdown_controller["name"].endswith("idle-shutdown")
+    assert shutdown_controller["replicas"] == 1
     assert targets["decode"]["worker_indices"] is None
     assert targets["prefill"]["worker_indices"] is None
     role = _find(objects, "Role", "idle-shutdown-rbac")
-    assert role["rules"][-1] == {
+    assert next(
+        rule
+        for rule in role["rules"]
+        if rule["apiGroups"] == ["leaderworkerset.x-k8s.io"]
+    ) == {
         "apiGroups": ["leaderworkerset.x-k8s.io"],
         "resources": ["leaderworkersets"],
         "resourceNames": ["vllm-ep8-decode", "vllm-ep8-prefill"],
         "verbs": ["get", "patch"],
+    }
+    assert next(
+        rule
+        for rule in role["rules"]
+        if rule["apiGroups"] == ["gateway.networking.k8s.io"]
+    ) == {
+        "apiGroups": ["gateway.networking.k8s.io"],
+        "resources": ["gateways"],
+        "resourceNames": [rendered_gateway["metadata"]["name"]],
+        "verbs": ["delete"],
     }
     compile(
         _find(objects, "ConfigMap", "idle-shutdown")["data"]["idle_shutdown.py"],
@@ -216,7 +246,7 @@ def test_idle_shutdown_rolls_back_successful_scale_patches(monkeypatch):
     namespace["api_request"] = api_request
 
     with pytest.raises(OSError, match="transient API failure"):
-        namespace["scale_to_zero"]()
+        namespace["shut_down"]()
 
     assert patches == [
         ("/first", "PATCH", {"spec": {"replicas": 0}}),
@@ -224,6 +254,66 @@ def test_idle_shutdown_rolls_back_successful_scale_patches(monkeypatch):
         ("/third", "PATCH", {"spec": {"replicas": 0}}),
         ("/second", "PATCH", {"spec": {"replicas": 3}}),
         ("/first", "PATCH", {"spec": {"replicas": 2}}),
+    ]
+
+
+def test_idle_shutdown_deletes_gateway_before_stopping_controller(monkeypatch):
+    namespace = _idle_shutdown_functions(monkeypatch)
+    namespace["WORKLOADS"] = [
+        {"name": "model", "path": "/model", "replicas": 2},
+        {"name": "epp", "path": "/epp", "replicas": 1},
+    ]
+    namespace["GATEWAY"] = {"name": "gateway", "path": "/gateway"}
+    calls = []
+    controller_attempts = 0
+
+    def api_request(path, *, method="GET", body=None):
+        nonlocal controller_attempts
+        calls.append((path, method, body))
+        if path == "/controller":
+            controller_attempts += 1
+            if controller_attempts == 1:
+                raise OSError("transient API failure")
+
+    namespace["api_request"] = api_request
+    monkeypatch.setattr(namespace["time"], "sleep", lambda _seconds: None)
+
+    namespace["shut_down"]()
+
+    assert calls == [
+        ("/model", "PATCH", {"spec": {"replicas": 0}}),
+        ("/epp", "PATCH", {"spec": {"replicas": 0}}),
+        ("/gateway", "DELETE", None),
+        ("/controller", "PATCH", {"spec": {"replicas": 0}}),
+        ("/controller", "PATCH", {"spec": {"replicas": 0}}),
+    ]
+
+
+def test_idle_shutdown_restores_workloads_when_gateway_deletion_fails(monkeypatch):
+    namespace = _idle_shutdown_functions(monkeypatch)
+    namespace["WORKLOADS"] = [
+        {"name": "model", "path": "/model", "replicas": 2},
+        {"name": "epp", "path": "/epp", "replicas": 1},
+    ]
+    namespace["GATEWAY"] = {"name": "gateway", "path": "/gateway"}
+    calls = []
+
+    def api_request(path, *, method="GET", body=None):
+        calls.append((path, method, body))
+        if path == "/gateway":
+            raise OSError("gateway API unavailable")
+
+    namespace["api_request"] = api_request
+
+    with pytest.raises(OSError, match="gateway API unavailable"):
+        namespace["shut_down"]()
+
+    assert calls == [
+        ("/model", "PATCH", {"spec": {"replicas": 0}}),
+        ("/epp", "PATCH", {"spec": {"replicas": 0}}),
+        ("/gateway", "DELETE", None),
+        ("/epp", "PATCH", {"spec": {"replicas": 1}}),
+        ("/model", "PATCH", {"spec": {"replicas": 2}}),
     ]
 
 
@@ -246,8 +336,14 @@ def test_idle_shutdown_can_be_disabled_or_given_a_custom_timeout():
         item["name"]: item
         for item in controller["spec"]["template"]["spec"]["containers"][0]["env"]
     }
+    role = _find(objects, "Role", "idle-shutdown-rbac")
 
     assert env["TIMEOUT_SECONDS"]["value"] == "720"
+    assert env["GATEWAY"]["value"] == "null"
+    assert not any(
+        rule["apiGroups"] == ["gateway.networking.k8s.io"]
+        for rule in role["rules"]
+    )
 
 
 def test_idle_shutdown_only_scrapes_cross_node_tp_api_servers():

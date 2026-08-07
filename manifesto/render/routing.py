@@ -15,6 +15,14 @@ from ..spec import DeploymentSpec, RoutingKind, RoutingSpec
 _LWS_WORKER_INDEX_LABEL = "leaderworkerset.sigs.k8s.io/worker-index"
 
 
+def gateway_name(instance: Instance, cluster: Cluster) -> str:
+    """Return the Gateway name while reserving space for its class suffix."""
+    return instance.name(
+        "gateway",
+        max_length=63 - len(cluster.gateway.class_name) - 1,
+    )
+
+
 def _default_plugin_config(routing: RoutingSpec) -> dict:
     if routing.plugin_config is not None:
         return routing.plugin_config
@@ -188,8 +196,7 @@ def render_routing(spec: DeploymentSpec, instance: Instance, cluster: Cluster) -
     infpool_name = instance.name("infpool")
     epp_name = instance.name("infpool-epp")
     epp_role_name = instance.name("infpool-epp-rbac")
-    gateway_name_limit = 63 - len(cluster.gateway.class_name) - 1
-    gateway_name = instance.name("gateway", max_length=gateway_name_limit)
+    gateway_resource_name = gateway_name(instance, cluster)
     plugin_configs = _plugin_configs(
         spec.routing,
         profile_worker_indices=_profile_worker_indices(spec, target_role),
@@ -371,7 +378,7 @@ def render_routing(spec: DeploymentSpec, instance: Instance, cluster: Cluster) -
             "apiVersion": "gateway.networking.k8s.io/v1",
             "kind": "Gateway",
             "metadata": {
-                "name": gateway_name,
+                "name": gateway_resource_name,
                 "labels": instance.labels("gateway") | {"istio.io/enable-inference-extproc": "true"},
             },
             "spec": {
@@ -398,7 +405,13 @@ def render_routing(spec: DeploymentSpec, instance: Instance, cluster: Cluster) -
             "kind": "HTTPRoute",
             "metadata": {"name": instance.name("route"), "labels": instance.labels("route")},
             "spec": {
-                "parentRefs": [{"group": "gateway.networking.k8s.io", "kind": "Gateway", "name": gateway_name}],
+                "parentRefs": [
+                    {
+                        "group": "gateway.networking.k8s.io",
+                        "kind": "Gateway",
+                        "name": gateway_resource_name,
+                    }
+                ],
                 "rules": [
                     {
                         "backendRefs": [
