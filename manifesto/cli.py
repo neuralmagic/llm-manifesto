@@ -51,11 +51,30 @@ from .workflow import (
     servers,
     stop,
 )
+from .workload import load_workload, render_workload, workload_settings
 
 
 def _render(args: argparse.Namespace, *, routing_only: bool = False) -> int:
     config = RuntimeConfig.from_args(args)
     sys.stdout.write(render_manifest(args, config, routing_only=routing_only))
+    return 0
+
+
+def _render_workload(args: argparse.Namespace) -> int:
+    workload = load_workload(args.spec)
+    settings = (
+        workload_settings(load_cluster(args.cluster)) if args.cluster else None
+    )
+    yaml.safe_dump_all(
+        render_workload(
+            workload,
+            settings=settings,
+            accelerator=args.accelerator,
+        ),
+        sys.stdout,
+        sort_keys=False,
+        explicit_start=True,
+    )
     return 0
 
 
@@ -420,6 +439,15 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_context_arg(render_bootstrap_parser)
     render_bootstrap_parser.add_argument("--namespace")
     render_bootstrap_parser.set_defaults(func=_render_bootstrap)
+
+    render_workload_parser = render_sub.add_parser(
+        "workload",
+        help="render a controller-neutral Job, Deployment, or LeaderWorkerSet",
+    )
+    render_workload_parser.add_argument("spec")
+    render_workload_parser.add_argument("--cluster")
+    render_workload_parser.add_argument("--accelerator")
+    render_workload_parser.set_defaults(func=_render_workload)
 
     explain_parser = sub.add_parser(
         "explain", help="explain resolved role features and their contributions"

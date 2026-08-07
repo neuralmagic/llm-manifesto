@@ -1,0 +1,30 @@
+name: example-gpu-job
+backend: job
+
+metadata:
+  labels:
+    app.kubernetes.io/name: example-gpu-job
+
+pod_template:
+  metadata:
+    labels:
+      app.kubernetes.io/name: example-gpu-job
+  spec:
+    restartPolicy: Never
+    containers:
+      - name: worker
+        image: example.invalid/worker:replace-me
+        command: [python]
+        args: [-c, "print('replace this example command')"]
+        resources:
+          requests: {cpu: "4", memory: 32Gi}
+
+accelerator_count: 1
+accelerator_container: worker
+queue_name: example-gpu-queue
+
+job:
+  suspend: true
+  backoff_limit: 0
+  active_deadline_seconds: 7200
+  ttl_seconds_after_finished: 86400

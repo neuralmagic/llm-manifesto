@@ -5,8 +5,9 @@ from pathlib import Path
 import pytest
 
 from manifesto.cluster import load_cluster
+from manifesto.instance import Instance
+from manifesto.render.lws import render_workload
 from manifesto.spec import load_spec
-
 
 ROOT = Path(__file__).resolve().parents[1]
 CLUSTER = load_cluster(ROOT / "clusters" / "example-gb200.yaml")
@@ -34,3 +35,19 @@ def test_deployments_inherit_default_and_can_override_accelerator():
 def test_unknown_accelerator_is_rejected():
     with pytest.raises(ValueError, match="unknown accelerator"):
         CLUSTER.accelerators.get("quantum-gpu")
+
+
+def test_accelerator_node_selector_is_applied_to_model_pods():
+    cluster = CLUSTER.model_copy(deep=True)
+    cluster.accelerators.profiles["gb200"].node_selector["gpu.product"] = "GB200"
+    spec = load_spec(ROOT / "models" / "qwen" / "aggregated.yaml", cluster)
+
+    workload = render_workload(
+        spec,
+        Instance(user="tester", release=spec.release),
+        cluster,
+        spec.roles[0],
+    )
+    assert workload["spec"]["template"]["spec"]["nodeSelector"] == {
+        "gpu.product": "GB200"
+    }

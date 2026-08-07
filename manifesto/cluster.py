@@ -139,8 +139,23 @@ class AcceleratorConfig(BaseModel):
 
     resource_name: str
     presence_label: str
+    node_selector: dict[str, str] = Field(default_factory=dict)
     gpu_arch: str
     torch_cuda_arch_list: str
+
+    @field_validator("resource_name")
+    @classmethod
+    def require_extended_resource_name(cls, value: str) -> str:
+        if not re.fullmatch(
+            r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?/[A-Za-z0-9]"
+            r"(?:[-A-Za-z0-9_.]*[A-Za-z0-9])?",
+            value,
+        ):
+            raise ValueError(
+                "accelerator resource_name must be a Kubernetes extended "
+                f"resource such as 'nvidia.com/gpu', got {value!r}"
+            )
+        return value
 
 
 class AcceleratorsConfig(BaseModel):
