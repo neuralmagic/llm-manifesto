@@ -32,7 +32,7 @@ def test_kimi_k3_aggregated_wide_ep_shape_and_backends():
 
     assert spec.topology == "aggregated"
     assert spec.model.id == "moonshotai/Kimi-K3"
-    assert spec.model.image == "vllm/vllm-openai:kimi-k3"
+    assert spec.model.image == "vllm/vllm-openai:nightly"
 
     assert decode.lws.size == 4
     assert decode.lws.same_topology_key == "nvidia.com/gpu.clique"
@@ -58,6 +58,8 @@ def test_kimi_k3_rendered_pods_request_full_gb200_nodes():
 
     assert container["resources"]["requests"]["nvidia.com/gpu"] == "4"
     assert container["resources"]["limits"]["nvidia.com/gpu"] == "4"
+    assert container["resources"]["requests"]["memory"] == "224Gi"
+    assert container["resources"]["limits"]["memory"] == "224Gi"
     assert not any(item["name"] == "VLLM_NIXL_SIDE_CHANNEL_HOST" for item in container["env"])
     assert not any(item["name"] == "VLLM_USE_RUST_FRONTEND" for item in container["env"])
 
