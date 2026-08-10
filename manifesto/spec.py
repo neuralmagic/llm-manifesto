@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import re
-import warnings
-from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
@@ -35,6 +33,10 @@ class DpLoadBalancing(StrEnum):
 
 # GPU count assumed when a spec is loaded without a cluster profile to infer from.
 DEFAULT_GPUS_PER_POD = 8
+DEFAULT_CPU_BASE = 6
+DEFAULT_CPU_PER_GPU = 2
+DEFAULT_MEMORY_PER_GPU_GI = 64
+DEFAULT_MINIMUM_MEMORY_GI = 128
 _CONFIG_MAP_KEY_RE = re.compile(r"[A-Za-z0-9._-]{1,253}")
 
 
@@ -142,9 +144,9 @@ class ParallelismSpec(BaseModel):
 class ResourceSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # These fallbacks keep cluster-less spec inspection backwards compatible.
-    # Rendering always applies the selected cluster's policy to omitted fields.
-    cpu: str = "32"
+    # These fallbacks match the built-in formulas for DEFAULT_GPUS_PER_POD.
+    # Rendering recalculates omitted fields for the resolved per-pod GPU count.
+    cpu: str = "22"
     memory: str = "512Gi"
     gpus: int = Field(DEFAULT_GPUS_PER_POD, ge=0)
     ephemeral_storage: str | None = None
@@ -375,15 +377,16 @@ class DeploymentSpec(BaseModel):
             if "gpus" not in role.resources.model_fields_set:
                 role.resources.gpus = role.gpus_per_pod
             if "cpu" not in role.resources.model_fields_set:
-                role.resources.cpu = _multiply_quantity(
-                    cluster.model_server_resources.cpu_per_gpu, role.gpus_per_pod
+                role.resources.cpu = str(
+                    DEFAULT_CPU_BASE + DEFAULT_CPU_PER_GPU * role.gpus_per_pod
                 )
             if "memory" not in role.resources.model_fields_set:
-                role.resources.memory = _multiply_quantity(
-                    cluster.model_server_resources.memory_per_gpu, role.gpus_per_pod
+                memory_gi = max(
+                    DEFAULT_MEMORY_PER_GPU_GI * role.gpus_per_pod,
+                    DEFAULT_MINIMUM_MEMORY_GI,
                 )
+                role.resources.memory = f"{memory_gi}Gi"
             parallel_layout(role)
-            _warn_if_role_does_not_pack(role, cluster)
 
 
 def _api_server_count(vllm_args: dict[str, Any]) -> int:
@@ -403,78 +406,6 @@ def _infer_gpus_per_pod(role: RoleSpec, _cluster_gpus_per_node: int) -> int:
             f"does not divide evenly across lws.size={role.lws.size}"
         )
     return ranks // role.lws.size
-
-
-_QUANTITY_RE = re.compile(r"^(?P<number>[0-9]+(?:\.[0-9]+)?)(?P<suffix>[a-zA-Z]*)$")
-_CPU_FACTORS = {"": Decimal(1), "m": Decimal("0.001")}
-_MEMORY_FACTORS = {
-    "": Decimal(1),
-    "k": Decimal(1000),
-    "M": Decimal(1000) ** 2,
-    "G": Decimal(1000) ** 3,
-    "T": Decimal(1000) ** 4,
-    "Ki": Decimal(1024),
-    "Mi": Decimal(1024) ** 2,
-    "Gi": Decimal(1024) ** 3,
-    "Ti": Decimal(1024) ** 4,
-}
-
-
-def _multiply_quantity(quantity: str, multiplier: int) -> str:
-    match = _QUANTITY_RE.fullmatch(quantity)
-    if not match:
-        raise ValueError(f"unsupported Kubernetes quantity: {quantity}")
-    value = Decimal(match.group("number")) * multiplier
-    rendered = format(value, "f")
-    if "." in rendered:
-        rendered = rendered.rstrip("0").rstrip(".")
-    return f"{rendered}{match.group('suffix')}"
-
-
-def _quantity_value(quantity: str, factors: dict[str, Decimal]) -> Decimal:
-    match = _QUANTITY_RE.fullmatch(quantity)
-    if not match or match.group("suffix") not in factors:
-        raise ValueError(f"unsupported Kubernetes quantity: {quantity}")
-    return Decimal(match.group("number")) * factors[match.group("suffix")]
-
-
-def _warn_if_role_does_not_pack(role: RoleSpec, cluster: Cluster) -> None:
-    gpu_request = role.resources.gpus
-    if gpu_request == 0:
-        return
-    pods_per_node = min(
-        role.lws.size * role.lws.replicas,
-        cluster.gpus_per_node // gpu_request,
-    )
-    if pods_per_node == 0:
-        return
-
-    checks = (
-        (
-            "CPU",
-            role.resources.cpu,
-            cluster.model_server_resources.node_allocatable_cpu,
-            _CPU_FACTORS,
-        ),
-        (
-            "memory",
-            role.resources.memory,
-            cluster.model_server_resources.node_allocatable_memory,
-            _MEMORY_FACTORS,
-        ),
-    )
-    for label, request, allocatable, factors in checks:
-        if request is None or allocatable is None:
-            continue
-        aggregate = _quantity_value(request, factors) * pods_per_node
-        if aggregate > _quantity_value(allocatable, factors):
-            warnings.warn(
-                f"{role.name}: {pods_per_node} pods fit on a {cluster.gpus_per_node}-GPU node "
-                f"but request {request} {label} each ({_multiply_quantity(request, pods_per_node)} total), "
-                f"exceeding node allocatable {label} {allocatable}",
-                UserWarning,
-                stacklevel=3,
-            )
 
 
 def _safe_cache_key(value: str) -> str:

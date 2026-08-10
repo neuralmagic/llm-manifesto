@@ -20,10 +20,6 @@ storage:
 pod_defaults:
   shm_size: 2Gi
 
-model_server_resources:
-  cpu_per_gpu: "8"
-  memory_per_gpu: 32Gi
-
 fabric:
   ucx_net_devices: ""
   default_profile: standard
