@@ -404,7 +404,6 @@ spec:
 
 - available accelerators and the cluster default
 - GPUs per node
-- model-server CPU and memory requests per GPU
 - shared and local volume mounts
 - optional namespace bootstrap configuration for shared PVCs
 - pod annotations, scheduling constraints, extra devices, and security context
@@ -414,31 +413,32 @@ spec:
 - UCX/NCCL/NVSHMEM/IMEX fabric env profiles
 - optional Kueue LocalQueue selection for GPU LeaderWorkerSets
 
-When a role omits `resources.cpu` or `resources.memory`, Manifesto scales the
-request from the role's inferred GPUs per pod and the cluster policy:
+When a role omits `resources.cpu` or `resources.memory`, Manifesto derives the
+request from the role's inferred GPUs per pod (`N`) using built-in defaults:
+
+- CPU: `6 + 2N`
+- memory: `max(64Gi * N, 128Gi)`
+
+For example:
+
+| GPUs per pod | CPU | Memory |
+| ---: | ---: | ---: |
+| 1 | 8 | 128Gi |
+| 2 | 10 | 128Gi |
+| 4 | 14 | 256Gi |
+| 8 | 22 | 512Gi |
+
+Set either value directly on a role when a model needs a different request:
 
 ```yaml
-accelerators:
-  default: gb200
-  profiles:
-    gb200:
-      resource_name: nvidia.com/gpu
-      presence_label: nvidia.com/gpu.present
-      # Optional when the resource name alone does not select this GPU class.
-      node_selector: {gpu.product: GB200}
-      gpu_arch: gb200
-      torch_cuda_arch_list: "10.0+PTX"
-
-model_server_resources:
-  cpu_per_gpu: "8"
-  memory_per_gpu: 128Gi
-  node_allocatable_cpu: "128"       # optional, enables packing warnings
-  node_allocatable_memory: 2Ti      # optional, enables packing warnings
+roles:
+  - name: decode
+    parallelism: {tp: 4}
+    resources: {memory: 224Gi}
 ```
 
-Explicit role resource values always win. If allocatable capacity is set,
-rendering warns when the number of role pods that fit by GPU would exceed the
-node's aggregate CPU or memory capacity.
+Explicit role resource values always win independently, so the example keeps
+the built-in 14-CPU request while using exactly 224Gi of memory.
 
 ### Reusing cluster workload settings
 
@@ -456,8 +456,8 @@ accelerator = settings.accelerator("gb200")
 The portable projection contains only accelerator resource names and node
 selectors, the default Kueue LocalQueue, and pod placement defaults such as
 affinity, tolerations, DNS, annotations, and image pull policy. Storage,
-model-server resources, fabric configuration, and launch settings remain part
-of Manifesto's serving-specific cluster model.
+fabric configuration, and launch settings remain part of Manifesto's
+serving-specific cluster model.
 
 Manifesto also owns a controller-neutral workload IR and its Kubernetes object
 lowering. This lets tools describe a pod template and lifecycle policy while

@@ -58,7 +58,7 @@ def test_aggregate_lws_uses_declarative_local_queue_without_resource_changes():
     vllm = next(container for container in containers if container["name"] == "vllm")
     assert vllm["resources"] == {
         "requests": {
-            "cpu": "32",
+            "cpu": "14",
             "memory": "224Gi",
             "nvidia.com/gpu": "4",
             "ephemeral-storage": "128Gi",

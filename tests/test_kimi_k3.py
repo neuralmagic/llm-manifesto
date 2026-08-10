@@ -58,6 +58,7 @@ def test_kimi_k3_rendered_pods_request_full_gb200_nodes():
 
     assert container["resources"]["requests"]["nvidia.com/gpu"] == "4"
     assert container["resources"]["limits"]["nvidia.com/gpu"] == "4"
+    assert container["resources"]["requests"]["cpu"] == "14"
     assert container["resources"]["requests"]["memory"] == "224Gi"
     assert container["resources"]["limits"]["memory"] == "224Gi"
     assert not any(item["name"] == "VLLM_NIXL_SIDE_CHANNEL_HOST" for item in container["env"])

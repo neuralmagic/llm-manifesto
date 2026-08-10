@@ -1,5 +1,8 @@
 """Generic cluster-profile customization rendering tests."""
 
+import pytest
+from pydantic import ValidationError
+
 from manifesto.cluster import Cluster
 from manifesto.instance import Instance
 from manifesto.render import render
@@ -67,7 +70,6 @@ def _custom_cluster(*, scc: str | None = None) -> Cluster:
                     "runAsUser": 0,
                 },
             },
-            "model_server_resources": {"cpu_per_gpu": "2", "memory_per_gpu": "8Gi"},
             "fabric": {
                 "ucx_net_devices": "rdma0:1",
                 "default_profile": "standard",
@@ -103,6 +105,17 @@ def _spec(cluster: Cluster) -> DeploymentSpec:
     )
     spec.apply_cluster_defaults(cluster)
     return spec
+
+
+def test_removed_model_server_resources_section_is_rejected():
+    cluster = _custom_cluster().model_dump(mode="json")
+    cluster["model_server_resources"] = {
+        "cpu_per_gpu": "8",
+        "memory_per_gpu": "224Gi",
+    }
+
+    with pytest.raises(ValidationError, match="model_server_resources"):
+        Cluster.model_validate(cluster)
 
 
 def test_pod_defaults_render_metadata_scheduling_resources_and_security():

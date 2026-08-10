@@ -137,33 +137,38 @@ def test_single_gpu_no_dp_role_derives_one_gpu_from_tp():
     assert role.resources.memory == "64Gi"
 
 
-def test_omitted_resources_scale_with_local_dp_gpu_shape():
-    spec = DeploymentSpec.model_validate(
-        {
-            "release": "scaled",
-            "topology": "aggregated",
-            "model": {"id": "model", "image": "image"},
-            "routing": {"kind": "disabled"},
-            "roles": [
-                {
-                    "name": "prefill",
-                    "lws": {"size": 1, "replicas": 4},
-                    "parallelism": {"tp": 1, "dp": 2},
-                }
-            ],
-        }
-    )
+def test_omitted_resources_use_built_in_per_pod_gpu_formulas():
     cluster = CLUSTER.model_copy(deep=True)
     cluster.gpus_per_node = 8
-    cluster.model_server_resources.cpu_per_gpu = "8"
-    cluster.model_server_resources.memory_per_gpu = "64Gi"
+    expected = {
+        1: ("8", "128Gi"),
+        2: ("10", "128Gi"),
+        4: ("14", "256Gi"),
+        8: ("22", "512Gi"),
+    }
 
-    spec.apply_cluster_defaults(cluster)
+    for gpus, (cpu, memory) in expected.items():
+        spec = DeploymentSpec.model_validate(
+            {
+                "release": f"scaled-{gpus}",
+                "topology": "aggregated",
+                "model": {"id": "model", "image": "image"},
+                "routing": {"kind": "disabled"},
+                "roles": [
+                    {
+                        "name": "decode",
+                        "lws": {"size": 1},
+                        "parallelism": {"tp": gpus},
+                    }
+                ],
+            }
+        )
+        spec.apply_cluster_defaults(cluster)
 
-    role = spec.role("prefill")
-    assert role.gpus_per_pod == 2
-    assert role.resources.cpu == "16"
-    assert role.resources.memory == "128Gi"
+        role = spec.role("decode")
+        assert role.gpus_per_pod == gpus
+        assert role.resources.cpu == cpu
+        assert role.resources.memory == memory
 
 
 def test_explicit_cpu_and_memory_are_preserved_exactly():
@@ -187,6 +192,33 @@ def test_explicit_cpu_and_memory_are_preserved_exactly():
 
     assert spec.role("decode").resources.cpu == "3500m"
     assert spec.role("decode").resources.memory == "70Gi"
+
+
+def test_cpu_and_memory_defaults_apply_independently():
+    cases = (
+        ({"cpu": "3500m"}, "3500m", "256Gi"),
+        ({"memory": "70Gi"}, "14", "70Gi"),
+    )
+    for resources, cpu, memory in cases:
+        spec = DeploymentSpec.model_validate(
+            {
+                "release": "partial-explicit",
+                "topology": "aggregated",
+                "model": {"id": "model", "image": "image"},
+                "routing": {"kind": "disabled"},
+                "roles": [
+                    {
+                        "name": "decode",
+                        "parallelism": {"tp": 4},
+                        "resources": resources,
+                    }
+                ],
+            }
+        )
+        spec.apply_cluster_defaults(CLUSTER)
+
+        assert spec.role("decode").resources.cpu == cpu
+        assert spec.role("decode").resources.memory == memory
 
 
 def test_cache_key_comes_from_image_identity_unless_overridden():

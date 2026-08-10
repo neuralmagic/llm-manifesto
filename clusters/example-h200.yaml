@@ -27,10 +27,6 @@ rdma:
 pod_defaults:
   shm_size: 2Gi
 
-model_server_resources:
-  cpu_per_gpu: "8"
-  memory_per_gpu: 128Gi
-
 paths:
   user_root: /var/cache/manifesto/{user}
   cache_root: /var/cache/manifesto/{user}/jit-cache/{gpu_arch}/{cuda}/{cache_key}/{release}

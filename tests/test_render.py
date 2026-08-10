@@ -431,8 +431,8 @@ def test_dp_ports_feed_container_readiness_and_inferencepool():
     infpool = _find(objects, "InferencePool")
 
     assert [p["containerPort"] for p in container["ports"]] == [8100, 8200, 8201, 8202, 8203]
-    assert container["resources"]["requests"]["cpu"] == "32"
-    assert container["resources"]["requests"]["memory"] == "512Gi"
+    assert container["resources"]["requests"]["cpu"] == "14"
+    assert container["resources"]["requests"]["memory"] == "256Gi"
     readiness = container["readinessProbe"]["exec"]["command"][-1]
     assert "localhost:8000" in readiness
     assert "localhost:8003" in readiness
