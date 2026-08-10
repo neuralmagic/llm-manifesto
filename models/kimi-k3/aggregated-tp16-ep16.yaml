@@ -7,7 +7,7 @@ accelerator: gb200
 model:
   id: moonshotai/Kimi-K3
   label: Kimi-K3
-  image: vllm/vllm-openai:kimi-k3
+  image: vllm/vllm-openai:nightly
 
 routing: {kind: load_aware, target_role: decode}
 runtime: {sidecars: [dcgm-exporter, node-exporter]}
@@ -31,6 +31,7 @@ roles:
       NCCL_NVLS_ENABLE: "0"
       DEEPEP_METRICS_ENABLED: "1"
     resources:
+      memory: 224Gi
       ephemeral_storage: 128Gi
     vllm:
       load_format: fastsafetensors

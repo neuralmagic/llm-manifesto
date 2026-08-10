@@ -23,7 +23,7 @@ accelerator: gb200
 model:
   id: mgoin/Kimi-K3-pruned75
   label: Kimi-K3-pruned75
-  image: vllm/vllm-openai:kimi-k3
+  image: vllm/vllm-openai:nightly
 
 roles:
   - name: decode

@@ -59,12 +59,12 @@ def test_aggregate_lws_uses_declarative_local_queue_without_resource_changes():
     assert vllm["resources"] == {
         "requests": {
             "cpu": "32",
-            "memory": "512Gi",
+            "memory": "224Gi",
             "nvidia.com/gpu": "4",
             "ephemeral-storage": "128Gi",
         },
         "limits": {
-            "memory": "512Gi",
+            "memory": "224Gi",
             "nvidia.com/gpu": "4",
             "ephemeral-storage": "128Gi",
         },
