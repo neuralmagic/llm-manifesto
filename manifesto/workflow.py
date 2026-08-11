@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import importlib.metadata
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -21,7 +23,7 @@ import yaml
 from .cluster import Cluster, load_cluster
 from .catalog import ROOT, catalog_entries, config_home, resolve_catalog_path
 from .instance import Instance
-from .overrides import load_routing_profile
+from .overrides import load_routing_profile, load_spec_data
 from .render import render, render_to_yaml
 from .render.bootstrap import render_bootstrap
 from .render.routing import gateway_name as routing_gateway_name
@@ -92,6 +94,7 @@ TRANSIENT_KUBECTL_ERRORS = (
 MISSING_RESOURCE_ERRORS = ("the server doesn't have a resource type",)
 
 TRACE_OFF_VALUES = frozenset({"", "0", "false", "no", "off"})
+SOURCE_REPOSITORY = "https://github.com/neuralmagic/llm-manifesto"
 
 _UNSET = object()
 _kubectl_limits: dict[str, float | int | None] = {}
@@ -394,56 +397,139 @@ def render_manifest(
     cluster: Cluster | None = None,
 ) -> str:
     cluster = cluster or load_runtime_cluster(config, args)
+    model_path = resolve_model(args.spec)
     spec = load_spec(
-        resolve_model(args.spec),
+        model_path,
         cluster,
         accelerator=getattr(args, "accelerator", None),
     )
     apply_runtime_overrides(spec, args, config)
     return render_to_yaml(
         render(spec, user=config.user, cluster=cluster, routing_only=routing_only),
-        header=manifest_header(args, config, routing_only=routing_only),
+        header=manifest_header(
+            args,
+            config,
+            cluster=cluster,
+            model_path=model_path,
+            routing_only=routing_only,
+        ),
     )
 
 
-def manifest_header(args, config: RuntimeConfig, *, routing_only: bool) -> list[str]:
+def _source_revision() -> str:
+    """Return the immutable source revision for the running Manifesto code."""
+
+    try:
+        direct_url = importlib.metadata.distribution("llm-manifesto").read_text(
+            "direct_url.json"
+        )
+        metadata = json.loads(direct_url) if direct_url else {}
+        commit_id = metadata.get("vcs_info", {}).get("commit_id", "")
+        if re.fullmatch(r"[0-9a-fA-F]{40}", commit_id):
+            return commit_id.lower()
+    except (
+        AttributeError,
+        importlib.metadata.PackageNotFoundError,
+        json.JSONDecodeError,
+        TypeError,
+    ):
+        pass
+
+    if (ROOT / ".git").exists():
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            pass
+        else:
+            revision = result.stdout.strip()
+            if result.returncode == 0 and re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+                return revision.lower()
+
+    try:
+        return f"v{importlib.metadata.version('llm-manifesto')}"
+    except importlib.metadata.PackageNotFoundError:
+        return "main"
+
+
+def _expanded_yaml(data: dict) -> list[str]:
+    return yaml.safe_dump(data, sort_keys=False).rstrip().splitlines()
+
+
+def _heredoc_lines(name: str, data: dict, *, prefix: str = "") -> list[str]:
+    content = _expanded_yaml(data)
+    delimiter = f"MANIFESTO_{name}"
+    while delimiter in content:
+        delimiter += "_END"
+    return [
+        f"    {prefix}<(cat <<'{delimiter}'",
+        *content,
+        delimiter,
+        "    )",
+    ]
+
+
+def manifest_header(
+    args,
+    config: RuntimeConfig,
+    *,
+    cluster: Cluster,
+    model_path: str,
+    routing_only: bool,
+) -> list[str]:
     if not config.cluster_path:
         raise WorkflowError("No cluster profile configured.", code=2)
+    revision = _source_revision()
     command = [
+        "uvx",
+        "--from",
+        f"git+{SOURCE_REPOSITORY}@{revision}",
         "manifesto",
         "render",
         "routing" if routing_only else "manifest",
-        resolve_model(args.spec),
-        "--cluster",
-        config.cluster_path,
-        "--namespace",
-        config.namespace,
-        "--user",
-        config.user,
     ]
+    options: list[str] = []
     if getattr(args, "accelerator", None):
-        command.extend(["--gpu", args.accelerator])
+        options.extend(["--gpu", args.accelerator])
     routing_profile = getattr(args, "routing_profile", None) or os.environ.get(
         "MANIFESTO_ROUTING_PROFILE"
     )
     if routing_profile:
-        command.extend(["--routing-profile", routing_profile])
+        options.extend(["--routing-profile", routing_profile])
     for name in ("user_root", "log_root", "cache_root", "vllm_env"):
         value = getattr(args, name, None)
         if value:
-            command.extend([f"--{name.replace('_', '-')}", value])
+            options.extend([f"--{name.replace('_', '-')}", value])
     for hook in getattr(args, "pre_launch", None) or []:
-        command.extend(["--pre-launch", hook])
+        options.extend(["--pre-launch", hook])
     if getattr(args, "idle_timeout_minutes", None) is not None:
-        command.extend(["--idle-timeout", f"{args.idle_timeout_minutes}m"])
+        options.extend(["--idle-timeout", f"{args.idle_timeout_minutes}m"])
     if getattr(args, "no_idle_shutdown", False):
-        command.append("--no-idle-shutdown")
-    return [
+        options.append("--no-idle-shutdown")
+
+    cluster_data = cluster.model_dump(mode="json", exclude_none=True)
+    header = [
         "Generated by:",
-        f"  {shlex.join(command)}",
-        "Source: https://github.com/neuralmagic/llm-manifesto",
-        "Safe to edit before applying.",
+        f"  {shlex.join(command)} \\",
+        *_heredoc_lines("MODEL", load_spec_data(model_path)),
     ]
+    header[-1] += " \\"
+    header.extend(_heredoc_lines("CLUSTER", cluster_data, prefix="--cluster "))
+    if options:
+        header[-1] += " \\"
+        header.append(f"    {shlex.join(options)}")
+    header.extend(
+        [
+            "To set identity or placement, append --user USER and/or --namespace NAMESPACE.",
+            f"Source: {SOURCE_REPOSITORY}/tree/{revision}",
+            "Safe to edit before applying.",
+        ]
+    )
+    return header
 
 
 def render_to_file(args) -> Path:

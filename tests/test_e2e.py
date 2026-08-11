@@ -37,8 +37,9 @@ def test_e2e_runs_in_cluster_job_against_routed_gateway(monkeypatch):
     def fake_deploy(args, *, config, cluster):
         lifecycle.append("deploy")
         rendered = workflow.render_manifest(args, config, cluster=cluster)
-        assert "persistentVolumeClaim" not in rendered
-        assert "emptyDir" in rendered
+        resources = yaml.safe_dump_all(yaml.safe_load_all(rendered))
+        assert "persistentVolumeClaim" not in resources
+        assert "emptyDir" in resources
         return 0
 
     monkeypatch.setattr(workflow, "run", fake_run)
