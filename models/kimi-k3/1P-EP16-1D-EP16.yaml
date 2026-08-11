@@ -12,7 +12,7 @@ model:
 
 roles:
   - name: decode
-    lws: {size: 4}
+    lws: {size: 4, same_topology_key: nvidia.com/gpu.clique}
     parallelism: {dp: 16, ep: true}
     fabric_profile: standard
     kv_transfer_config:
@@ -45,7 +45,7 @@ roles:
 
       attention-config: '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}'
   - name: prefill
-    lws: {size: 4}
+    lws: {size: 4, same_topology_key: nvidia.com/gpu.clique}
     parallelism: {dp: 16, ep: true}
     fabric_profile: standard
     kv_transfer_config:

@@ -15,6 +15,7 @@ MODEL = ROOT / "models" / "kimi-k3" / "aggregated-tp16-ep16.yaml"
 PD_MODEL = ROOT / "models" / "kimi-k3" / "1P-1D-DP4-TP4.yaml"
 CLUSTER = load_cluster(ROOT / "clusters" / "example-gb200.yaml")
 ACTIVE_PORTS = "inference.networking.k8s.io/active-ports"
+KIMI_MODELS = tuple(sorted((ROOT / "models" / "kimi-k3").glob("*.yaml")))
 
 
 def _workload(objects: list[dict], role: str) -> dict:
@@ -24,6 +25,31 @@ def _workload(objects: list[dict], role: str) -> dict:
         if obj["kind"] == "LeaderWorkerSet"
         and obj["metadata"]["labels"]["llm-d.ai/role"] == role
     )
+
+
+def test_all_kimi_k3_lws_roles_stay_within_one_gpu_clique():
+    assert KIMI_MODELS
+
+    for model in KIMI_MODELS:
+        spec = load_spec(model, CLUSTER)
+        objects = render(spec, user="tester", cluster=CLUSTER)
+
+        for role in spec.roles:
+            if role.lws.size == 1:
+                continue
+
+            assert role.lws.same_topology_key == "nvidia.com/gpu.clique", (
+                f"{model.name} role {role.name} does not require clique co-location"
+            )
+            pod_spec = _workload(objects, role.name)["spec"]["leaderWorkerTemplate"][
+                "workerTemplate"
+            ]["spec"]
+            required = pod_spec["affinity"]["podAffinity"][
+                "requiredDuringSchedulingIgnoredDuringExecution"
+            ]
+            assert any(
+                term["topologyKey"] == "nvidia.com/gpu.clique" for term in required
+            )
 
 
 def test_kimi_k3_aggregated_wide_ep_shape_and_backends():
