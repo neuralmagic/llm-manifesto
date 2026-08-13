@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -9,6 +10,7 @@ import yaml
 from manifesto.cli import main
 from manifesto.cluster import load_cluster
 from manifesto.instance import Instance
+from manifesto.spec import RoutingFrontend, load_spec
 import manifesto.e2e as e2e_workflow
 import manifesto.workflow as workflow
 
@@ -19,7 +21,7 @@ DIRECT_MODEL = ROOT / "models" / "qwen" / "qwen3-0.6b.yaml"
 CLUSTER = ROOT / "clusters" / "example-gb200.yaml"
 
 
-def test_e2e_runs_in_cluster_job_against_routed_gateway(monkeypatch):
+def test_e2e_runs_in_cluster_job_against_standalone_router(monkeypatch):
     calls = []
     lifecycle = []
 
@@ -82,10 +84,10 @@ def test_e2e_runs_in_cluster_job_against_routed_gateway(monkeypatch):
     assert container["image"] == "registry.test/python:3.12"
     assert container["env"] == [
         {
-            "name": "MANIFESTO_E2E_URL",
-            "value": (
-                "http://qwen-gateway-istio.workload-ns.svc.cluster.local:80/v1"
-            ),
+                "name": "MANIFESTO_E2E_URL",
+                "value": (
+                    "http://qwen-infpool-epp.workload-ns.svc.cluster.local:80/v1"
+                ),
         },
         {"name": "MANIFESTO_E2E_TIMEOUT", "value": "300"},
     ]
@@ -105,6 +107,18 @@ def test_e2e_runs_in_cluster_job_against_routed_gateway(monkeypatch):
         "--wait=true",
         "--timeout=120s",
     ]
+
+
+def test_e2e_gateway_frontend_uses_gateway_service():
+    cluster = load_cluster(CLUSTER)
+    spec = load_spec(ROUTED_MODEL, cluster)
+    spec.routing.frontend = RoutingFrontend.GATEWAY
+
+    assert e2e_workflow._probe_url(
+        SimpleNamespace(user="tester", namespace="workload-ns"),
+        cluster,
+        spec,
+    ) == "http://qwen-gateway-istio.workload-ns.svc.cluster.local:80/v1"
 
 
 def test_e2e_can_use_external_env_with_cluster_storage_and_keep_namespace(monkeypatch):

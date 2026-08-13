@@ -26,8 +26,11 @@ from .instance import Instance
 from .overrides import load_routing_profile, load_spec_data
 from .render import render, render_to_yaml
 from .render.bootstrap import render_bootstrap
-from .render.routing import gateway_name as routing_gateway_name
-from .spec import EppSpec, RoutingKind, load_spec
+from .render.routing import (
+    gateway_name as routing_gateway_name,
+    standalone_service_name,
+)
+from .spec import EppSpec, RoutingFrontend, RoutingKind, load_spec
 
 
 HF_SECRET_NAME = "hf-secret"
@@ -559,7 +562,62 @@ def deploy(
         rc = execute_workload_transitions(config, transitions)
         if rc:
             return rc
-    return run([*config.kubectl(), "apply", "-f", "-"], input_text=manifest)
+    rc = run([*config.kubectl(), "apply", "-f", "-"], input_text=manifest)
+    if rc:
+        return rc
+    return cleanup_obsolete_routing(config, parse_manifest(manifest))
+
+
+def cleanup_obsolete_routing(config: RuntimeConfig, objects: list[dict]) -> int:
+    """Delete resources left behind when an instance changes routing frontend."""
+    routing_objects = [
+        obj
+        for obj in objects
+        if obj.get("kind") in {"InferencePool", "Gateway"}
+    ]
+    if not routing_objects:
+        return 0
+    labels = routing_objects[0].get("metadata", {}).get("labels", {})
+    instance_id = labels.get("app.kubernetes.io/instance")
+    if not instance_id:
+        raise WorkflowError("rendered routing resources have no instance identity")
+
+    gateway_desired = any(obj.get("kind") == "Gateway" for obj in routing_objects)
+    resource_types = (
+        ("configmaps",)
+        if gateway_desired
+        else (
+            "configmaps",
+            "gateways.gateway.networking.k8s.io",
+            "httproutes.gateway.networking.k8s.io",
+            "destinationrules.networking.istio.io",
+        )
+    )
+    live = discover_live_resources(
+        config,
+        instance_id=instance_id,
+        resource_types=resource_types,
+    )
+    obsolete = []
+    for resource in live:
+        component = resource.labels.get("app.kubernetes.io/component")
+        if gateway_desired:
+            if resource.kind == "ConfigMap" and component == "envoy":
+                obsolete.append(resource)
+        elif resource.kind in {"Gateway", "HTTPRoute", "DestinationRule"} or (
+            resource.kind == "ConfigMap" and component == "gateway"
+        ):
+            obsolete.append(resource)
+    if not obsolete:
+        return 0
+    return run(
+        [
+            *config.kubectl(),
+            "delete",
+            *(resource.kubectl_ref for resource in obsolete),
+            "--ignore-not-found=true",
+        ]
+    )
 
 
 def parse_manifest(manifest: str) -> list[dict]:
@@ -1252,9 +1310,14 @@ def ready(
     )
     epp = instance.name("infpool-epp")
 
-    gateway = ""
+    routing_service = ""
     if routing_enabled:
-        gateway = f"{routing_gateway_name(instance, cluster)}-{cluster.gateway.class_name}"
+        if spec.routing.frontend == RoutingFrontend.STANDALONE:
+            routing_service = standalone_service_name(instance)
+        else:
+            routing_service = (
+                f"{routing_gateway_name(instance, cluster)}-{cluster.gateway.class_name}"
+            )
 
     print("Waiting for model pods and endpoint picker...")
     waits = [
@@ -1279,8 +1342,8 @@ def ready(
         print("Ready.")
         return 0
 
-    print("Checking gateway...")
-    url = f"http://{gateway}:80/v1/models"
+    print("Checking routing frontend...")
+    url = f"http://{routing_service}:80/v1/models"
     deadline = time.monotonic() + args.gateway_timeout
     while time.monotonic() < deadline:
         out = capture(["curl", "-sf", "--max-time", "5", url], check=False)
@@ -1295,7 +1358,10 @@ def ready(
             print("Ready.")
             return 0
         time.sleep(2)
-    print(f"Gateway did not become ready within {args.gateway_timeout}s.", file=sys.stderr)
+    print(
+        f"Routing frontend did not become ready within {args.gateway_timeout}s.",
+        file=sys.stderr,
+    )
     return 1
 
 

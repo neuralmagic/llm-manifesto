@@ -1,4 +1,4 @@
-"""Gateway API, InferencePool, and EPP manifests for instance-scoped routing."""
+"""Standalone or Gateway API routing manifests for one Manifesto instance."""
 
 from __future__ import annotations
 
@@ -10,9 +10,141 @@ from ..cluster import Cluster
 from ..instance import Instance
 from ..parallelism import parallel_layout
 from ..resolve import resolve_role
-from ..spec import DeploymentSpec, RoutingKind, RoutingSpec
+from ..spec import DeploymentSpec, RoutingFrontend, RoutingKind, RoutingSpec
 
 _LWS_WORKER_INDEX_LABEL = "leaderworkerset.sigs.k8s.io/worker-index"
+
+_ENVOY_CONFIG = """\
+admin:
+  address:
+    socket_address: {address: 127.0.0.1, port_value: 19000}
+static_resources:
+  listeners:
+    - name: ready
+      address:
+        socket_address: {address: 0.0.0.0, port_value: 19001}
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: envoy-ready-http
+                route_config:
+                  name: ready
+                  virtual_hosts:
+                    - name: ready
+                      domains: ["*"]
+                      routes:
+                        - match: {prefix: /}
+                          direct_response: {status: 200}
+                http_filters:
+                  - name: envoy.filters.http.health_check
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.health_check.v3.HealthCheck
+                      pass_through_mode: false
+                      headers:
+                        - name: ":path"
+                          string_match: {exact: /ready}
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+    - name: vllm
+      address:
+        socket_address: {address: 0.0.0.0, port_value: 8081}
+      per_connection_buffer_limit_bytes: 32768
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: http-8081
+                route_config:
+                  name: vllm
+                  virtual_hosts:
+                    - name: vllm
+                      domains: ["*"]
+                      routes:
+                        - match: {prefix: /}
+                          route:
+                            cluster: original_destination_cluster
+                            timeout: 86400s
+                            idle_timeout: 86400s
+                            upgrade_configs:
+                              - upgrade_type: websocket
+                          typed_per_filter_config:
+                            envoy.filters.http.ext_proc:
+                              "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                              config: {}
+                http_filters:
+                  - name: envoy.filters.http.ext_proc
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+                      failure_mode_allow: true
+                      grpc_service:
+                        envoy_grpc: {cluster_name: ext_proc, authority: localhost:9002}
+                        timeout: 10s
+                      processing_mode:
+                        request_header_mode: SEND
+                        response_header_mode: SEND
+                        request_body_mode: FULL_DUPLEX_STREAMED
+                        response_body_mode: FULL_DUPLEX_STREAMED
+                        request_trailer_mode: SEND
+                        response_trailer_mode: SEND
+                      message_timeout: 1000s
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                      suppress_envoy_headers: true
+                use_remote_address: true
+                normalize_path: true
+                merge_slashes: true
+  clusters:
+    - name: original_destination_cluster
+      type: ORIGINAL_DST
+      connect_timeout: 1000s
+      lb_policy: CLUSTER_PROVIDED
+      circuit_breakers:
+        thresholds:
+          - {max_connections: 40000, max_pending_requests: 40000, max_requests: 40000}
+      original_dst_lb_config:
+        use_http_header: true
+        http_header_name: x-gateway-destination-endpoint
+    - name: ext_proc
+      type: STATIC
+      connect_timeout: 86400s
+      lb_policy: LEAST_REQUEST
+      circuit_breakers:
+        thresholds:
+          - {max_connections: 40000, max_pending_requests: 40000, max_requests: 40000, max_retries: 1024}
+      health_checks:
+        - timeout: 2s
+          interval: 10s
+          unhealthy_threshold: 3
+          healthy_threshold: 2
+          reuse_connection: true
+          grpc_health_check:
+            service_name: envoy.service.ext_proc.v3.ExternalProcessor
+          tls_options:
+            alpn_protocols: [h2]
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          common_tls_context:
+            validation_context: {}
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: ext_proc
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: {address: 127.0.0.1, port_value: 9002}
+"""
 
 
 def gateway_name(instance: Instance, cluster: Cluster) -> str:
@@ -21,6 +153,56 @@ def gateway_name(instance: Instance, cluster: Cluster) -> str:
         "gateway",
         max_length=63 - len(cluster.gateway.class_name) - 1,
     )
+
+
+def standalone_service_name(instance: Instance) -> str:
+    """Return the Service that exposes the standalone Envoy frontend."""
+    return instance.name("infpool-epp")
+
+
+def _envoy_container(cluster: Cluster) -> dict:
+    return {
+        "name": "envoy-proxy",
+        "image": cluster.llm_d.envoy,
+        "imagePullPolicy": "IfNotPresent",
+        "args": [
+            "--service-node",
+            "envoy-sidecar",
+            "--log-level",
+            "warn",
+            "--concurrency",
+            "8",
+            "--drain-strategy",
+            "immediate",
+            "--drain-time-s",
+            "60",
+            "-c",
+            "/etc/envoy/envoy.yaml",
+        ],
+        "ports": [
+            {"containerPort": 8081, "name": "http"},
+            {"containerPort": 19001, "name": "envoy-ready"},
+        ],
+        "readinessProbe": {
+            "failureThreshold": 1,
+            "httpGet": {"path": "/ready", "port": 19001, "scheme": "HTTP"},
+            "periodSeconds": 5,
+            "successThreshold": 1,
+            "timeoutSeconds": 1,
+        },
+        "resources": {
+            "requests": {"cpu": "4", "memory": "8Gi"},
+            "limits": {"memory": "16Gi"},
+        },
+        "volumeMounts": [
+            {
+                "name": "envoy-config",
+                "mountPath": "/etc/envoy/envoy.yaml",
+                "subPath": "envoy.yaml",
+                "readOnly": True,
+            }
+        ],
+    }
 
 
 def _default_plugin_config(routing: RoutingSpec) -> dict:
@@ -202,6 +384,7 @@ def render_routing(spec: DeploymentSpec, instance: Instance, cluster: Cluster) -
         profile_worker_indices=_profile_worker_indices(spec, target_role),
     )
     plugins_config_file = _plugins_config_file(spec.routing)
+    standalone = spec.routing.frontend == RoutingFrontend.STANDALONE
 
     selector = instance.pod_selector(None if spec.routing.kind == RoutingKind.PD else spec.routing.target_role) | {
         "llm-d.ai/inferenceServing": "true",
@@ -209,7 +392,89 @@ def render_routing(spec: DeploymentSpec, instance: Instance, cluster: Cluster) -
     }
     pool_selector: dict = {"matchLabels": selector}
 
-    return [
+    epp_container = {
+        "name": "epp",
+        "image": (
+            spec.routing.epp.image
+            if spec.routing.epp is not None and spec.routing.epp.image is not None
+            else spec.routing.epp_image or cluster.llm_d.epp
+        ),
+        "imagePullPolicy": "Always",
+        "args": [
+            f"--config-file=/etc/epp/{plugins_config_file}",
+            "--grpc-port=9002",
+            f"--pool-name={infpool_name}",
+            f"--pool-namespace={spec.namespace}",
+        ],
+        "ports": [{"containerPort": 9002, "name": "grpc"}],
+        "volumeMounts": [
+            {
+                "name": "config",
+                "mountPath": f"/etc/epp/{plugins_config_file}",
+                "subPath": plugins_config_file,
+            }
+        ],
+        "resources": {
+            "requests": {"cpu": "8", "memory": "16Gi"},
+            "limits": {"cpu": "8", "memory": "16Gi"},
+        },
+    }
+    containers = [epp_container]
+    volumes = [{"name": "config", "configMap": {"name": instance.name("epp-config")}}]
+    service_ports = [
+        {"name": "grpc", "port": 9002, "protocol": "TCP", "targetPort": 9002}
+    ]
+    if standalone:
+        containers.insert(0, _envoy_container(cluster))
+        volumes.append(
+            {
+                "name": "envoy-config",
+                "configMap": {"name": instance.name("envoy-config")},
+            }
+        )
+        service_ports.append(
+            {"name": "http", "port": 80, "protocol": "TCP", "targetPort": 8081}
+        )
+
+    deployment_spec = {
+        "replicas": (
+            spec.routing.epp.replicas
+            if spec.routing.epp is not None
+            else spec.routing.replicas
+        ),
+        "selector": {"matchLabels": instance.labels("epp")},
+        "template": {
+            "metadata": {
+                "labels": instance.labels("epp") | {"inferencepool": epp_name}
+            },
+            "spec": {
+                "serviceAccountName": epp_name,
+                "affinity": {
+                    "nodeAffinity": {
+                        "requiredDuringSchedulingIgnoredDuringExecution": {
+                            "nodeSelectorTerms": [
+                                {
+                                    "matchExpressions": [
+                                        {
+                                            "key": "kubernetes.io/arch",
+                                            "operator": "In",
+                                            "values": ["amd64"],
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                },
+                "containers": containers,
+                "volumes": volumes,
+            },
+        },
+    }
+    if standalone:
+        deployment_spec["template"]["spec"]["terminationGracePeriodSeconds"] = 130
+
+    objects = [
         {
             "apiVersion": "v1",
             "kind": "ServiceAccount",
@@ -265,6 +530,21 @@ def render_routing(spec: DeploymentSpec, instance: Instance, cluster: Cluster) -
             "metadata": {"name": instance.name("epp-config"), "labels": instance.labels("routing")},
             "data": plugin_configs,
         },
+        *(
+            [
+                {
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": {
+                        "name": instance.name("envoy-config"),
+                        "labels": instance.labels("envoy"),
+                    },
+                    "data": {"envoy.yaml": _ENVOY_CONFIG},
+                }
+            ]
+            if standalone
+            else []
+        ),
         {
             "apiVersion": "inference.networking.k8s.io/v1",
             "kind": "InferencePool",
@@ -281,71 +561,22 @@ def render_routing(spec: DeploymentSpec, instance: Instance, cluster: Cluster) -
             "metadata": {"name": epp_name, "labels": instance.labels("epp")},
             "spec": {
                 "selector": instance.labels("epp"),
-                "ports": [{"name": "grpc", "port": 9002, "protocol": "TCP", "targetPort": 9002}],
+                "ports": service_ports,
             },
         },
         {
             "apiVersion": "apps/v1",
             "kind": "Deployment",
             "metadata": {"name": epp_name, "labels": instance.labels("epp")},
-            "spec": {
-                "replicas": spec.routing.epp.replicas if spec.routing.epp is not None else spec.routing.replicas,
-                "selector": {"matchLabels": instance.labels("epp")},
-                "template": {
-                    "metadata": {"labels": instance.labels("epp") | {"inferencepool": epp_name}},
-                    "spec": {
-                        "serviceAccountName": epp_name,
-                        "affinity": {
-                            "nodeAffinity": {
-                                "requiredDuringSchedulingIgnoredDuringExecution": {
-                                    "nodeSelectorTerms": [
-                                        {
-                                            "matchExpressions": [
-                                                {
-                                                    "key": "kubernetes.io/arch",
-                                                    "operator": "In",
-                                                    "values": ["amd64"],
-                                                }
-                                            ]
-                                        }
-                                    ]
-                                }
-                            }
-                        },
-                        "containers": [
-                            {
-                                "name": "epp",
-                                "image": (
-                                    spec.routing.epp.image
-                                    if spec.routing.epp is not None and spec.routing.epp.image is not None
-                                    else spec.routing.epp_image or cluster.llm_d.epp
-                                ),
-                                "imagePullPolicy": "Always",
-                                "args": [
-                                    f"--config-file=/etc/epp/{plugins_config_file}",
-                                    "--grpc-port=9002",
-                                    f"--pool-name={infpool_name}",
-                                    f"--pool-namespace={spec.namespace}",
-                                ],
-                                "ports": [{"containerPort": 9002, "name": "grpc"}],
-                                "volumeMounts": [
-                                    {
-                                        "name": "config",
-                                        "mountPath": f"/etc/epp/{plugins_config_file}",
-                                        "subPath": plugins_config_file,
-                                    }
-                                ],
-                                "resources": {
-                                    "requests": {"cpu": "8", "memory": "16Gi"},
-                                    "limits": {"cpu": "8", "memory": "16Gi"},
-                                },
-                            }
-                        ],
-                        "volumes": [{"name": "config", "configMap": {"name": instance.name("epp-config")}}],
-                    },
-                },
-            },
+            "spec": deployment_spec,
         },
+    ]
+
+    if standalone:
+        return objects
+
+    objects.extend(
+        [
         {
             "apiVersion": "v1",
             "kind": "ConfigMap",
@@ -467,4 +698,6 @@ def render_routing(spec: DeploymentSpec, instance: Instance, cluster: Cluster) -
                 },
             },
         },
-    ]
+        ]
+    )
+    return objects
