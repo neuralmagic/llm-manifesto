@@ -15,8 +15,9 @@ from .cluster import Cluster
 from .images import DEFAULT_IMAGES
 from .instance import Instance
 from .render import render, render_to_yaml
+from .render.routing import gateway_name, standalone_service_name
 from .resolve import resolve_role
-from .spec import DeploymentSpec, RoutingKind, load_spec
+from .spec import DeploymentSpec, RoutingFrontend, RoutingKind, load_spec
 
 
 E2E_IMAGE = DEFAULT_IMAGES.get("test.e2e")
@@ -201,10 +202,11 @@ def _probe_url(
         role = next((item for item in spec.roles if item.name == "decode"), spec.roles[0])
         port = resolve_role(spec, instance, cluster, role).ports.public[0]
         service = instance.name(f"{role.name}-svc")
+    elif spec.routing.frontend == RoutingFrontend.STANDALONE:
+        service = standalone_service_name(instance)
+        port = 80
     else:
-        service = instance.name(
-            "gateway", max_length=63 - len(cluster.gateway.class_name) - 1
-        ) + f"-{cluster.gateway.class_name}"
+        service = gateway_name(instance, cluster) + f"-{cluster.gateway.class_name}"
         port = 80
     return f"http://{service}.{config.namespace}.svc.cluster.local:{port}/v1"
 

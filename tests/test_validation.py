@@ -127,6 +127,14 @@ def test_dp_true_is_rejected():
         )
 
 
+def test_unknown_routing_frontend_is_rejected():
+    data = _spec_with_role({"name": "decode"})
+    data["routing"] = {"kind": "load_aware", "frontend": "ingress"}
+
+    with pytest.raises(ValidationError, match="standalone.*gateway"):
+        DeploymentSpec.model_validate(data)
+
+
 def test_epp_selected_plugin_config_must_exist():
     with pytest.raises(ValidationError, match="is not present in plugin_configs"):
         EppSpec(

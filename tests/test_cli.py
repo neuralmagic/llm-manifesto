@@ -12,7 +12,7 @@ from manifesto.cli import _build_parser, main
 from manifesto.cluster import load_cluster
 from manifesto.overrides import load_routing_profile
 from manifesto.render import render
-from manifesto.spec import load_spec
+from manifesto.spec import RoutingFrontend, load_spec
 import manifesto.workflow as workflow
 from manifesto.workflow import (
     MANAGED_RESOURCE_TYPES,
@@ -836,6 +836,7 @@ def test_deploy_pipes_rendered_manifest_to_kubectl(monkeypatch):
     monkeypatch.setattr(workflow, "run", fake_run)
     monkeypatch.setattr(workflow, "preflight_workloads", lambda *_: None)
     monkeypatch.setattr(workflow, "plan_workload_transitions", lambda *_: [])
+    monkeypatch.setattr(workflow, "cleanup_obsolete_routing", lambda *_: 0)
 
     rc = main(["deploy", str(MODEL), "--vllm-env", "/mnt/shared/tester/vllm-envs/feature"])
 
@@ -862,6 +863,7 @@ def test_deploy_honors_context_and_idle_timeout(monkeypatch):
     monkeypatch.setattr(workflow, "run", fake_run)
     monkeypatch.setattr(workflow, "preflight_workloads", lambda *_: None)
     monkeypatch.setattr(workflow, "plan_workload_transitions", lambda *_: [])
+    monkeypatch.setattr(workflow, "cleanup_obsolete_routing", lambda *_: 0)
 
     rc = main(
         [
@@ -919,14 +921,87 @@ def test_deploy_routing_applies_without_syncing_hf_secret(monkeypatch):
         "run",
         lambda cmd, *, input_text=None: calls.append((cmd, input_text)) or 0,
     )
+    monkeypatch.setattr(workflow, "cleanup_obsolete_routing", lambda *_: 0)
 
     rc = main(["deploy", "routing", str(MODEL), "--user", "tester"])
 
     assert rc == 0
     assert len(calls) == 1
     assert calls[0][0] == ["kubectl", "-n", "workload-ns", "apply", "-f", "-"]
-    assert "kind: HTTPRoute" in calls[0][1]
+    assert "kind: InferencePool" in calls[0][1]
+    assert "name: envoy-proxy" in calls[0][1]
+    assert "kind: HTTPRoute" not in calls[0][1]
     assert "kind: LeaderWorkerSet" not in calls[0][1]
+
+
+def test_standalone_deploy_prunes_obsolete_gateway_resources(monkeypatch):
+    spec = load_spec(MODEL, load_cluster(CLUSTER))
+    objects = render(spec, user="tester", cluster=load_cluster(CLUSTER), routing_only=True)
+    live = [
+        workflow.LiveResource.from_object(
+            _live_object(
+                kind,
+                name,
+                spec.release,
+                api_version=api_version,
+                labels={"app.kubernetes.io/component": component},
+            )
+        )
+        for kind, name, api_version, component in [
+            ("ConfigMap", "old-gateway-options", "v1", "gateway"),
+            ("Gateway", "old-gateway", "gateway.networking.k8s.io/v1", "gateway"),
+            ("HTTPRoute", "old-route", "gateway.networking.k8s.io/v1", "route"),
+            ("DestinationRule", "old-epp", "networking.istio.io/v1", "epp"),
+        ]
+    ]
+    calls = []
+    monkeypatch.setattr(workflow, "discover_live_resources", lambda *_args, **_kwargs: live)
+    monkeypatch.setattr(workflow, "run", lambda cmd, **_kwargs: calls.append(cmd) or 0)
+    config = workflow.RuntimeConfig("tester", "workload-ns", None, Path("/tmp/out"))
+
+    assert workflow.cleanup_obsolete_routing(config, objects) == 0
+    assert calls == [[
+        "kubectl",
+        "-n",
+        "workload-ns",
+        "delete",
+        "configmaps/old-gateway-options",
+        "gateways.gateway.networking.k8s.io/old-gateway",
+        "httproutes.gateway.networking.k8s.io/old-route",
+        "destinationrules.networking.istio.io/old-epp",
+        "--ignore-not-found=true",
+    ]]
+
+
+def test_gateway_deploy_prunes_obsolete_envoy_config(monkeypatch):
+    cluster = load_cluster(CLUSTER)
+    spec = load_spec(MODEL, cluster)
+    spec.routing.frontend = RoutingFrontend.GATEWAY
+    objects = render(spec, user="tester", cluster=cluster, routing_only=True)
+    live = [
+        workflow.LiveResource.from_object(
+            _live_object(
+                "ConfigMap",
+                "old-envoy-config",
+                spec.release,
+                labels={"app.kubernetes.io/component": "envoy"},
+            )
+        )
+    ]
+    calls = []
+    monkeypatch.setattr(workflow, "discover_live_resources", lambda *_args, **_kwargs: live)
+    monkeypatch.setattr(workflow, "run", lambda cmd, **_kwargs: calls.append(cmd) or 0)
+    config = workflow.RuntimeConfig("tester", "workload-ns", None, Path("/tmp/out"))
+
+    assert workflow.cleanup_obsolete_routing(config, objects) == 0
+    assert calls == [[
+        "kubectl",
+        "-n",
+        "workload-ns",
+        "delete",
+        "configmaps/old-envoy-config",
+        "--ignore-not-found=true",
+    ]]
 
 
 def test_bootstrap_applies_profile_namespace_prerequisites(monkeypatch, tmp_path):
@@ -1051,6 +1126,68 @@ def test_ready_waits_for_spec_roles_only(monkeypatch, tmp_path):
     assert not any("deploy/" in cmd for cmd in joined)
 
 
+def test_ready_uses_standalone_service_by_default(monkeypatch):
+    popen_cmds = []
+    capture_cmds = []
+
+    class FakeProc:
+        def wait(self):
+            return 0
+
+    monkeypatch.setenv("MANIFESTO_NAMESPACE", "workload-ns")
+    monkeypatch.setattr(
+        workflow.subprocess,
+        "Popen",
+        lambda cmd: popen_cmds.append(cmd) or FakeProc(),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "capture",
+        lambda cmd, **_: capture_cmds.append(cmd) or '{"data":[{"id":"model"}]}',
+    )
+
+    rc = main(["ready", str(MODEL), "--cluster", str(CLUSTER), "--user", "tester"])
+
+    assert rc == 0
+    assert popen_cmds
+    assert capture_cmds[0][-1] == (
+        "http://wide-ep-1p-ep8-1d-ep8-infpool-epp:80/v1/models"
+    )
+
+
+def test_ready_probes_standalone_service_without_execing_into_envoy(monkeypatch):
+    popen_cmds = []
+    capture_cmds = []
+
+    class FakeProc:
+        def wait(self):
+            return 0
+
+    def fake_capture(cmd, **_kwargs):
+        capture_cmds.append(cmd)
+        return "" if cmd[0] == "curl" else '{"data":[{"id":"model"}]}'
+
+    monkeypatch.setenv("MANIFESTO_NAMESPACE", "workload-ns")
+    monkeypatch.setattr(
+        workflow.subprocess,
+        "Popen",
+        lambda cmd: popen_cmds.append(cmd) or FakeProc(),
+    )
+    monkeypatch.setattr(workflow, "capture", fake_capture)
+
+    rc = main(["ready", str(MODEL), "--cluster", str(CLUSTER), "--user", "tester"])
+
+    assert rc == 0
+    assert capture_cmds[1] == [
+        "kubectl",
+        "get",
+        "--raw",
+        "/api/v1/namespaces/workload-ns/services/"
+        "http:wide-ep-1p-ep8-1d-ep8-infpool-epp:80/proxy/v1/models",
+    ]
+    assert not any("exec" in cmd for cmd in capture_cmds)
+
+
 def test_ready_uses_gateway_class_from_cluster(monkeypatch):
     popen_cmds = []
     capture_cmds = []
@@ -1061,8 +1198,11 @@ def test_ready_uses_gateway_class_from_cluster(monkeypatch):
 
     cluster = load_cluster(CLUSTER)
     cluster.gateway.class_name = "platform-gateway"
+    spec = load_spec(MODEL, cluster)
+    spec.routing.frontend = RoutingFrontend.GATEWAY
     monkeypatch.setenv("MANIFESTO_NAMESPACE", "workload-ns")
     monkeypatch.setattr(workflow, "load_cluster_with_overrides", lambda *_: cluster)
+    monkeypatch.setattr(workflow, "load_spec", lambda *_args, **_kwargs: spec)
     monkeypatch.setattr(workflow.subprocess, "Popen", lambda cmd: popen_cmds.append(cmd) or FakeProc())
     monkeypatch.setattr(
         workflow,

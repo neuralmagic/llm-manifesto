@@ -51,7 +51,10 @@ def render(
         include_user_in_name=cluster.naming.user_prefix,
     )
     if routing_only:
-        return render_routing(spec, instance, cluster)
+        return [
+            *render_idle_shutdown(spec, instance, cluster),
+            *render_routing(spec, instance, cluster),
+        ]
 
     objects = []
     if cluster.openshift.scc:

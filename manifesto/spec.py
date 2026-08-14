@@ -26,6 +26,11 @@ class RoutingKind(StrEnum):
     DISABLED = "disabled"
 
 
+class RoutingFrontend(StrEnum):
+    STANDALONE = "standalone"
+    GATEWAY = "gateway"
+
+
 class DpLoadBalancing(StrEnum):
     INTERNAL = "internal"
     EXTERNAL = "external"
@@ -264,6 +269,7 @@ class EppSpec(BaseModel):
 
 class RoutingSpec(BaseModel):
     kind: RoutingKind | None = None
+    frontend: RoutingFrontend = RoutingFrontend.STANDALONE
     epp_image: str | None = None
     plugin_config: dict[str, Any] | None = None
     replicas: int = Field(1, ge=1)

@@ -24,7 +24,7 @@ It emits raw Kubernetes manifests:
 
 - Deployment or LeaderWorkerSet model-server workloads, depending on node count
 - InferencePool and endpoint picker deployment
-- Gateway API and HTTPRoute objects
+- standalone Envoy routing by default, or optional Gateway API objects
 - per-pod monitoring sidecars
 - instance-scoped names, labels, selectors, and cache paths
 
@@ -263,6 +263,23 @@ choose a default without repeating the flag. Advanced specs can still use
 `plugin_configs` with `plugins_config_file` to bundle and select multiple files;
 existing `routing.plugin_config` specs continue to render as `plugins.yaml`.
 
+Routed specs use a standalone Envoy sidecar in the EPP pod by default. The EPP
+Service exposes port 80, while the `InferencePool` remains the source of model
+endpoints and rank ports. Select the Gateway API frontend explicitly when shared
+Gateway infrastructure is required:
+
+```yaml
+routing:
+  kind: pd
+  target_role: decode
+  frontend: gateway  # standalone (default) or gateway
+```
+
+`manifesto deploy` removes resources left by the previous frontend after a
+successful apply. The low-level `manifesto file apply` command intentionally
+applies only the saved file and cannot prune resources omitted from it; use
+`manifesto stop` before that workflow when changing frontends.
+
 `workload_name` is optional. When set, it controls the Deployment or
 LeaderWorkerSet name and therefore the Kubernetes pod name prefix, while full
 release-specific instance labels still scope routing and selectors.
@@ -348,8 +365,9 @@ role before normal schema validation.
 Every deployment includes an idle-shutdown controller by default. Once all
 expected vLLM API servers are ready, it watches request counters and running or
 queued requests across all roles. After 45 idle minutes it scales the model
-workloads and endpoint picker to zero, deletes the instance Gateway so its
-platform-managed proxy replicas are released, and scales itself to zero.
+workloads and endpoint picker to zero, deletes the instance Gateway when the
+Gateway frontend is selected so its platform-managed proxy replicas are
+released, and scales itself to zero.
 Applying or deploying the spec again restores all of those resources. Change
 the timeout or opt out in the runtime configuration:
 
@@ -660,7 +678,7 @@ manifesto deploy SPEC *ARGS          # render and apply a full stack
 manifesto servers                    # list live servers in the namespace
 manifesto stop [SPEC] [--now]        # discover and delete live objects
 manifesto stop --instance ID         # stop by live instance identity
-manifesto ready SPEC                 # wait for pods and gateway to serve
+manifesto ready SPEC                 # wait for pods and routing frontend
 manifesto test e2e SPEC              # fresh-namespace dev + inference integration test
 manifesto deploy routing SPEC *ARGS  # update routing only
 ```
@@ -731,8 +749,8 @@ manifesto stop
 fresh namespace, replaces profile storage with `emptyDir` volumes, deploys the
 vLLM bundled in the model image, waits for it to become ready, and creates an
 unprivileged Job that calls `/v1/models` followed by a real `/v1/completions`
-request. The Job targets the generated Gateway when routing is enabled and the
-model Service otherwise.
+request. The Job targets the standalone router Service or generated Gateway
+when routing is enabled, and the model Service otherwise.
 
 Pass `--vllm-env /absolute/worktree/path` to test an existing vllm-envs
 worktree instead. That mode preserves the cluster profile's normal storage so

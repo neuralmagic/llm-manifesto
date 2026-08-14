@@ -53,15 +53,15 @@ objects:
 
 - Deployment or LeaderWorkerSet model-server workloads, depending on node count.
 - InferencePool and endpoint picker deployment.
-- Gateway API and HTTPRoute objects.
+- Standalone Envoy routing by default, or optional Gateway API objects.
 - Per-pod monitoring sidecars.
 - Instance-scoped names, labels, selectors, and cache paths.
 
 Key components:
 
 - **vLLM** - Model server and inference engine.
-- **Inference Gateway** - Request scheduler and balancer through Gateway API
-  InferencePool.
+- **llm-d Router** - Envoy and EPP request scheduling through an InferencePool,
+  with Gateway API available as an explicit frontend.
 - **Kubernetes** - Infrastructure orchestrator and workload control plane.
 - **LeaderWorkerSet** - Multi-host inference coordination.
 - **NIXL** - Fast interconnect library for KV cache transfer.

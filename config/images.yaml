@@ -5,6 +5,7 @@ vllm:
 llm_d:
   release: v0.8.0
   epp: ghcr.io/llm-d/llm-d-inference-scheduler:{release}
+  envoy: docker.io/envoyproxy/envoy:distroless-v1.33.2
   routing_sidecar: ghcr.io/llm-d/llm-d-routing-sidecar:{release}
 
 sidecars:

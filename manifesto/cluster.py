@@ -223,6 +223,10 @@ class LlmdConfig(BaseModel):
         return self._image("epp")
 
     @property
+    def envoy(self) -> str:
+        return self._image("envoy")
+
+    @property
     def routing_sidecar(self) -> str:
         return self._image("routing_sidecar")
 

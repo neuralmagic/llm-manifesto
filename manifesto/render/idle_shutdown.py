@@ -11,7 +11,7 @@ from ..images import DEFAULT_IMAGES
 from ..instance import Instance
 from ..parallelism import parallel_layout
 from ..resolve import resolve_role
-from ..spec import DeploymentSpec, RoutingKind
+from ..spec import DeploymentSpec, RoutingFrontend, RoutingKind
 from .routing import gateway_name
 
 
@@ -294,14 +294,15 @@ def render_idle_shutdown(
                 ),
             }
         )
-        gateway_resource_name = gateway_name(instance, cluster)
-        gateway = {
-            "name": gateway_resource_name,
-            "path": (
-                f"/apis/gateway.networking.k8s.io/v1/namespaces/"
-                f"{spec.namespace}/gateways/{gateway_resource_name}"
-            ),
-        }
+        if spec.routing.frontend == RoutingFrontend.GATEWAY:
+            gateway_resource_name = gateway_name(instance, cluster)
+            gateway = {
+                "name": gateway_resource_name,
+                "path": (
+                    f"/apis/gateway.networking.k8s.io/v1/namespaces/"
+                    f"{spec.namespace}/gateways/{gateway_resource_name}"
+                ),
+            }
 
     controller_path = f"/apis/apps/v1/namespaces/{spec.namespace}/deployments/{name}"
     controller = {"name": name, "path": controller_path, "replicas": 1}

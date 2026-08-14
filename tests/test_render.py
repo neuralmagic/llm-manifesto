@@ -16,7 +16,7 @@ from manifesto.images import DEFAULT_IMAGES
 from manifesto.overrides import load_routing_profile
 from manifesto.render import render, render_to_yaml
 from manifesto.render.idle_shutdown import IDLE_SHUTDOWN_SCRIPT
-from manifesto.spec import EppSpec, RuntimeSpec, load_spec
+from manifesto.spec import EppSpec, RoutingFrontend, RuntimeSpec, load_spec
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +51,14 @@ def _find(objects: list[dict], kind: str, name_suffix: str | None = None) -> dic
         if name_suffix is None or obj["metadata"]["name"].endswith(name_suffix):
             return obj
     raise AssertionError(f"missing {kind} {name_suffix or ''}")
+
+
+def _container(deployment: dict, name: str) -> dict:
+    return next(
+        item
+        for item in deployment["spec"]["template"]["spec"]["containers"]
+        if item["name"] == name
+    )
 
 
 def _idle_shutdown_functions(monkeypatch) -> dict:
@@ -169,14 +177,7 @@ def test_idle_shutdown_is_enabled_by_default_for_45_minutes():
         "vllm-ep8-prefill",
         "wide-ep-1p-ep8-1d-ep8-infpool-epp",
     }
-    rendered_gateway = _find(objects, "Gateway")
-    assert gateway == {
-        "name": rendered_gateway["metadata"]["name"],
-        "path": (
-            "/apis/gateway.networking.k8s.io/v1/namespaces/"
-            f"default/gateways/{rendered_gateway['metadata']['name']}"
-        ),
-    }
+    assert gateway is None
     assert shutdown_controller["name"].endswith("idle-shutdown")
     assert shutdown_controller["replicas"] == 1
     assert targets["decode"]["worker_indices"] is None
@@ -192,20 +193,34 @@ def test_idle_shutdown_is_enabled_by_default_for_45_minutes():
         "resourceNames": ["vllm-ep8-decode", "vllm-ep8-prefill"],
         "verbs": ["get", "patch"],
     }
-    assert next(
-        rule
+    assert not any(
+        rule["apiGroups"] == ["gateway.networking.k8s.io"]
         for rule in role["rules"]
-        if rule["apiGroups"] == ["gateway.networking.k8s.io"]
-    ) == {
-        "apiGroups": ["gateway.networking.k8s.io"],
-        "resources": ["gateways"],
-        "resourceNames": [rendered_gateway["metadata"]["name"]],
-        "verbs": ["delete"],
-    }
+    )
     compile(
         _find(objects, "ConfigMap", "idle-shutdown")["data"]["idle_shutdown.py"],
         "idle_shutdown.py",
         "exec",
+    )
+
+
+def test_gateway_frontend_grants_idle_shutdown_gateway_delete():
+    spec = load_spec(ROOT / "models" / DEEPSEEK, CLUSTER)
+    spec.routing.frontend = RoutingFrontend.GATEWAY
+    objects = render(spec, user="tester", cluster=CLUSTER)
+    controller = _find(objects, "Deployment", "idle-shutdown")
+    env = {
+        item["name"]: item
+        for item in controller["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    rendered_gateway = _find(objects, "Gateway")
+
+    assert json.loads(env["GATEWAY"]["value"])["name"] == rendered_gateway["metadata"]["name"]
+    role = _find(objects, "Role", "idle-shutdown-rbac")
+    assert any(
+        rule["apiGroups"] == ["gateway.networking.k8s.io"]
+        and rule["resourceNames"] == [rendered_gateway["metadata"]["name"]]
+        for rule in role["rules"]
     )
 
 
@@ -591,6 +606,7 @@ def test_gateway_class_comes_from_cluster_profile():
     cluster = CLUSTER.model_copy(deep=True)
     cluster.gateway.class_name = "platform-gateway"
     spec = load_spec(ROOT / "models" / DEEPSEEK, cluster)
+    spec.routing.frontend = RoutingFrontend.GATEWAY
     objects = render(spec, user="tester", cluster=cluster)
     gateway = _find(objects, "Gateway")
     gateway_options = _find(objects, "ConfigMap", "gateway-options")
@@ -602,6 +618,112 @@ def test_gateway_class_comes_from_cluster_profile():
         for obj in objects
     )
     assert yaml.safe_load(gateway_options["data"]["service"])["spec"]["type"] == "ClusterIP"
+
+
+def test_standalone_is_the_default_and_routing_only_refreshes_idle_shutdown():
+    spec = load_spec(ROOT / "models" / DEEPSEEK, CLUSTER)
+    objects = render(spec, user="tester", cluster=CLUSTER, routing_only=True)
+
+    assert spec.routing.frontend == RoutingFrontend.STANDALONE
+    assert len(objects) == 13
+    assert [obj["kind"] for obj in objects] == [
+        "ServiceAccount",
+        "Role",
+        "RoleBinding",
+        "ConfigMap",
+        "Deployment",
+        "ServiceAccount",
+        "Role",
+        "RoleBinding",
+        "ConfigMap",
+        "ConfigMap",
+        "InferencePool",
+        "Service",
+        "Deployment",
+    ]
+    assert not any(
+        obj["kind"] in {"Gateway", "HTTPRoute", "DestinationRule"}
+        for obj in objects
+    )
+
+
+def test_standalone_routing_ignores_long_gateway_class_name():
+    cluster = CLUSTER.model_copy(deep=True)
+    cluster.gateway.class_name = "g" * 53
+    spec = load_spec(ROOT / "models" / DEEPSEEK, cluster)
+
+    objects = render(spec, user="tester", cluster=cluster, routing_only=True)
+
+    assert _find(objects, "Service", "infpool-epp")
+    assert not any(obj["kind"] == "Gateway" for obj in objects)
+
+
+def test_standalone_envoy_sidecar_and_service_match_router_contract():
+    cluster = CLUSTER.model_copy(deep=True)
+    cluster.llm_d.images["envoy"] = "registry.test/envoy:v1"
+    spec = load_spec(ROOT / "models" / DEEPSEEK, cluster)
+    objects = render(spec, user="tester", cluster=cluster, routing_only=True)
+    service = _find(objects, "Service", "infpool-epp")
+    deployment = _find(objects, "Deployment", "infpool-epp")
+    envoy = _container(deployment, "envoy-proxy")
+    config = yaml.safe_load(_find(objects, "ConfigMap", "envoy-config")["data"]["envoy.yaml"])
+
+    assert service["spec"]["ports"] == [
+        {"name": "grpc", "port": 9002, "protocol": "TCP", "targetPort": 9002},
+        {"name": "http", "port": 80, "protocol": "TCP", "targetPort": 8081},
+    ]
+    assert deployment["spec"]["template"]["spec"]["terminationGracePeriodSeconds"] == 130
+    assert envoy["image"] == "registry.test/envoy:v1"
+    main_listener = next(item for item in config["static_resources"]["listeners"] if item["name"] == "vllm")
+    http_manager = main_listener["filter_chains"][0]["filters"][0]["typed_config"]
+    ext_proc = http_manager["http_filters"][0]["typed_config"]
+    assert ext_proc["failure_mode_allow"] is True
+    assert ext_proc["processing_mode"]["request_body_mode"] == "FULL_DUPLEX_STREAMED"
+    assert ext_proc["processing_mode"]["response_body_mode"] == "FULL_DUPLEX_STREAMED"
+    ext_proc_cluster = next(
+        item for item in config["static_resources"]["clusters"] if item["name"] == "ext_proc"
+    )
+    assert ext_proc_cluster["health_checks"][0]["tls_options"] == {
+        "alpn_protocols": ["h2"]
+    }
+    assert ext_proc_cluster["transport_socket"]["name"] == "envoy.transport_sockets.tls"
+    socket = ext_proc_cluster["load_assignment"]["endpoints"][0]["lb_endpoints"][0]["endpoint"]["address"]["socket_address"]
+    assert socket == {"address": "127.0.0.1", "port_value": 9002}
+
+
+def test_explicit_gateway_frontend_preserves_gateway_resources():
+    spec = load_spec(ROOT / "models" / DEEPSEEK, CLUSTER)
+    spec.routing.frontend = RoutingFrontend.GATEWAY
+    objects = render(spec, user="tester", cluster=CLUSTER, routing_only=True)
+    deployment = _find(objects, "Deployment", "infpool-epp")
+    service = _find(objects, "Service", "infpool-epp")
+
+    assert len(objects) == 17
+    assert {obj["kind"] for obj in objects} >= {"Gateway", "HTTPRoute", "DestinationRule"}
+    assert [item["name"] for item in deployment["spec"]["template"]["spec"]["containers"]] == ["epp"]
+    assert [port["name"] for port in service["spec"]["ports"]] == ["grpc"]
+
+
+def test_gateway_routing_only_refreshes_idle_shutdown_gateway_state():
+    spec = load_spec(ROOT / "models" / DEEPSEEK, CLUSTER)
+    spec.routing.frontend = RoutingFrontend.GATEWAY
+
+    objects = render(spec, user="tester", cluster=CLUSTER, routing_only=True)
+
+    gateway = _find(objects, "Gateway")
+    controller = _find(objects, "Deployment", "idle-shutdown")
+    env = {
+        item["name"]: item["value"]
+        for item in controller["spec"]["template"]["spec"]["containers"][0]["env"]
+        if "value" in item
+    }
+    role = _find(objects, "Role", "idle-shutdown-rbac")
+    assert json.loads(env["GATEWAY"])["name"] == gateway["metadata"]["name"]
+    assert any(
+        rule["apiGroups"] == ["gateway.networking.k8s.io"]
+        and rule["resourceNames"] == [gateway["metadata"]["name"]]
+        for rule in role["rules"]
+    )
 
 
 def test_dedicated_logging_pvc_is_mounted_when_configured():
@@ -938,7 +1060,7 @@ def test_inferencepool_references_epp_service():
 def test_epp_uses_current_config_file_flag():
     objects = _objects(DEEPSEEK)
     deployment = _find(objects, "Deployment", "infpool-epp")
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    container = _container(deployment, "epp")
     args = container["args"]
 
     assert container["image"] == DEFAULT_IMAGES.get("llm_d.epp", release=DEFAULT_IMAGES.get("llm_d.release"))
@@ -952,7 +1074,7 @@ def test_wide_ep_uses_kv_aware_epp_scheduling():
     objects = _objects_with_routing_profile(DEEPSEEK, "wide-ep-lws-config")
     config_map = _find(objects, "ConfigMap", "epp-config")
     deployment = _find(objects, "Deployment", "infpool-epp")
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    container = _container(deployment, "epp")
 
     assert list(config_map["data"]) == ["wide-ep-lws-config.yaml"]
     config = yaml.safe_load(config_map["data"]["wide-ep-lws-config.yaml"])
@@ -1070,7 +1192,7 @@ def test_routing_epp_can_select_one_of_multiple_plugin_configs():
     objects = render(spec, user="tester", cluster=CLUSTER)
     config = _find(objects, "ConfigMap", "epp-config")
     deployment = _find(objects, "Deployment", "infpool-epp")
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    container = _container(deployment, "epp")
 
     assert set(config["data"]) == {"default.yaml", "kv-aware.yaml"}
     assert deployment["spec"]["replicas"] == 2
