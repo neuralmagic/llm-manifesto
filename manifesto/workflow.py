@@ -1344,6 +1344,10 @@ def ready(
 
     print("Checking routing frontend...")
     url = f"http://{routing_service}:80/v1/models"
+    proxy_path = (
+        f"/api/v1/namespaces/{config.namespace}/services/"
+        f"http:{routing_service}:80/proxy/v1/models"
+    )
     deadline = time.monotonic() + args.gateway_timeout
     while time.monotonic() < deadline:
         out = capture(["curl", "-sf", "--max-time", "5", url], check=False)
@@ -1351,7 +1355,7 @@ def ready(
             print("Ready.")
             return 0
         out = capture(
-            [*config.kubectl(), "exec", f"deploy/{epp}", "--", "curl", "-sf", "--max-time", "5", url],
+            [*config.kubectl_base(), "get", "--raw", proxy_path],
             check=False,
         )
         if '"id"' in out:

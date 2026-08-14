@@ -1155,6 +1155,39 @@ def test_ready_uses_standalone_service_by_default(monkeypatch):
     )
 
 
+def test_ready_probes_standalone_service_without_execing_into_envoy(monkeypatch):
+    popen_cmds = []
+    capture_cmds = []
+
+    class FakeProc:
+        def wait(self):
+            return 0
+
+    def fake_capture(cmd, **_kwargs):
+        capture_cmds.append(cmd)
+        return "" if cmd[0] == "curl" else '{"data":[{"id":"model"}]}'
+
+    monkeypatch.setenv("MANIFESTO_NAMESPACE", "workload-ns")
+    monkeypatch.setattr(
+        workflow.subprocess,
+        "Popen",
+        lambda cmd: popen_cmds.append(cmd) or FakeProc(),
+    )
+    monkeypatch.setattr(workflow, "capture", fake_capture)
+
+    rc = main(["ready", str(MODEL), "--cluster", str(CLUSTER), "--user", "tester"])
+
+    assert rc == 0
+    assert capture_cmds[1] == [
+        "kubectl",
+        "get",
+        "--raw",
+        "/api/v1/namespaces/workload-ns/services/"
+        "http:wide-ep-1p-ep8-1d-ep8-infpool-epp:80/proxy/v1/models",
+    ]
+    assert not any("exec" in cmd for cmd in capture_cmds)
+
+
 def test_ready_uses_gateway_class_from_cluster(monkeypatch):
     popen_cmds = []
     capture_cmds = []

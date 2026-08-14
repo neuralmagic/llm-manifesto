@@ -378,7 +378,6 @@ def render_routing(spec: DeploymentSpec, instance: Instance, cluster: Cluster) -
     infpool_name = instance.name("infpool")
     epp_name = instance.name("infpool-epp")
     epp_role_name = instance.name("infpool-epp-rbac")
-    gateway_resource_name = gateway_name(instance, cluster)
     plugin_configs = _plugin_configs(
         spec.routing,
         profile_worker_indices=_profile_worker_indices(spec, target_role),
@@ -575,6 +574,7 @@ def render_routing(spec: DeploymentSpec, instance: Instance, cluster: Cluster) -
     if standalone:
         return objects
 
+    gateway_resource_name = gateway_name(instance, cluster)
     objects.extend(
         [
         {
