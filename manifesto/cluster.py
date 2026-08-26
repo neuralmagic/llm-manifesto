@@ -115,7 +115,8 @@ class PodDefaults(BaseModel):
 class AcceleratorConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    resource_name: str
+    resource_name: str | None = None
+    device_class_name: str | None = None
     presence_label: str
     node_selector: dict[str, str] = Field(default_factory=dict)
     gpu_arch: str
@@ -123,7 +124,9 @@ class AcceleratorConfig(BaseModel):
 
     @field_validator("resource_name")
     @classmethod
-    def require_extended_resource_name(cls, value: str) -> str:
+    def require_extended_resource_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         if not re.fullmatch(
             r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?/[A-Za-z0-9]"
             r"(?:[-A-Za-z0-9_.]*[A-Za-z0-9])?",
@@ -134,6 +137,32 @@ class AcceleratorConfig(BaseModel):
                 f"resource such as 'nvidia.com/gpu', got {value!r}"
             )
         return value
+
+    @field_validator("device_class_name")
+    @classmethod
+    def require_device_class_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if len(value) > 253 or not re.fullmatch(
+            r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?", value
+        ):
+            raise ValueError(
+                "accelerator device_class_name must be a Kubernetes DNS "
+                f"subdomain such as 'gpu.nvidia.com', got {value!r}"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def require_one_allocation_backend(self) -> "AcceleratorConfig":
+        configured = sum(
+            value is not None for value in (self.resource_name, self.device_class_name)
+        )
+        if configured != 1:
+            raise ValueError(
+                "accelerator must define exactly one of resource_name or "
+                "device_class_name"
+            )
+        return self
 
 
 class AcceleratorsConfig(BaseModel):

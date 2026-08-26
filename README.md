@@ -293,6 +293,45 @@ Each cluster profile declares its available accelerator profiles and a
 `accelerator`. The selected entry controls the Kubernetes accelerator resource,
 accelerator-specific cache path, and dev build architecture.
 
+Accelerator allocation is cluster-owned and swappable. Existing profiles use a
+Kubernetes extended resource:
+
+```yaml
+accelerators:
+  default: b200
+  profiles:
+    b200:
+      resource_name: nvidia.com/gpu
+      presence_label: nvidia.com/gpu.present
+      gpu_arch: b200
+      torch_cuda_arch_list: "10.0+PTX"
+```
+
+To allocate the same role GPU counts through Dynamic Resource Allocation (DRA),
+replace `resource_name` with the cluster's `DeviceClass`:
+
+```yaml
+    b200:
+      device_class_name: gpu.nvidia.com
+      presence_label: nvidia.com/gpu.present
+      gpu_arch: b200
+      torch_cuda_arch_list: "10.0+PTX"
+```
+
+Exactly one of `resource_name` or `device_class_name` is required. Model specs
+do not change when switching backends. DRA profiles render an instance-scoped
+`resource.k8s.io/v1` `ResourceClaimTemplate` for each GPU role, request the
+role's existing GPU count with `ExactCount`, and attach the resulting claim only
+to the model container. CPU, memory, ephemeral storage, and RDMA remain ordinary
+container resources.
+
+DRA rendering requires a cluster serving `resource.k8s.io/v1` and the named
+`DeviceClass`. When Kueue is enabled, its DRA integration and a
+`deviceClassMappings` entry for the class must also be configured; the mapped
+logical resource must have ClusterQueue quota. Manifesto verifies the DRA APIs
+and DeviceClass before deployment, while Kueue remains authoritative for the
+mapping and quota accounting.
+
 Manifesto applies shared vLLM arguments before role-specific `vllm:` and
 computed arguments. By default, Uvicorn access logs omit the high-frequency
 `/health`, `/v1/models`, and `/metrics` endpoints while preserving inference
@@ -480,8 +519,8 @@ settings = workload_settings(load_cluster("clusters/my-cluster.yaml"))
 accelerator = settings.accelerator("gb200")
 ```
 
-The portable projection contains only accelerator resource names and node
-selectors, the default Kueue LocalQueue, and pod placement defaults such as
+The portable projection contains accelerator resource or DeviceClass names and
+node selectors, the default Kueue LocalQueue, and pod placement defaults such as
 affinity, tolerations, DNS, annotations, and image pull policy. Storage,
 fabric configuration, and launch settings remain part of Manifesto's
 serving-specific cluster model.

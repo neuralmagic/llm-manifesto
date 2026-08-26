@@ -8,7 +8,7 @@ import yaml
 
 from .base import render_dcgm_metrics_configmap, render_model_server_service, render_openshift_scc_binding, render_service_account
 from .idle_shutdown import render_idle_shutdown
-from .lws import render_workload
+from .lws import render_accelerator_claim_template, render_workload
 from .routing import render_routing
 from ..cluster import Cluster
 from ..instance import Instance
@@ -65,6 +65,11 @@ def render(
     if spec.roles and "dcgm-exporter" in spec.runtime.sidecars:
         objects.append(render_dcgm_metrics_configmap(instance))
     for role in spec.roles:
+        claim_template = render_accelerator_claim_template(
+            spec, instance, cluster, role
+        )
+        if claim_template is not None:
+            objects.append(claim_template)
         objects.append(render_workload(spec, instance, cluster, role))
         resolved = resolve_role(spec, instance, cluster, role)
         objects.append(

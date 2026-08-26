@@ -7,6 +7,11 @@ import copy
 from .common import env_list, field_ref_env, secret_env
 from .sidecars import sidecars
 from ..cluster import Cluster
+from ..dra import (
+    accelerator_claim_template_name,
+    attach_accelerator_claim,
+    render_accelerator_claim_template as render_dra_claim_template,
+)
 from ..features import Feature, WorkloadKind
 from ..instance import Instance
 from ..launch import build_launch_script
@@ -40,7 +45,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
     layout = parallel_layout(role)
     cross_node_tp = layout.cross_node_tp
     distributed_dp = layout.distributed_dp
-    workload_name = instance.user_scoped_name(role.workload_name) if role.workload_name else instance.name(role.name)
+    workload_name = role_workload_name(instance, role)
 
     containers, extra_volumes = sidecars(
         spec.runtime.sidecars,
@@ -106,7 +111,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
         "memory": role.resources.memory,
     }
     vllm_limits = {"memory": role.resources.memory}
-    if role.resources.gpus > 0:
+    if role.resources.gpus > 0 and accelerator.resource_name is not None:
         vllm_requests[accelerator.resource_name] = str(role.resources.gpus)
         vllm_limits[accelerator.resource_name] = str(role.resources.gpus)
 
@@ -205,9 +210,6 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
     if cluster.rdma.resource_name:
         for resources in ("requests", "limits"):
             vllm_container["resources"][resources][cluster.rdma.resource_name] = cluster.rdma.value
-    if resolved.resource_claims:
-        vllm_container["resources"]["claims"] = [{"name": claim["name"]} for claim in resolved.resource_claims]
-
     pod_labels = instance.labels("model-server", role.name) | {
         "llm-d.ai/inferenceServing": "true",
         "llm-d.ai/model": spec.model.label_value,
@@ -226,6 +228,22 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
         pod_metadata["annotations"] = annotations
 
     pod_spec = {"volumes": volumes, "containers": [vllm_container, *containers]}
+    if resolved.resource_claims:
+        pod_spec["resourceClaims"] = copy.deepcopy(resolved.resource_claims)
+        vllm_container["resources"]["claims"] = [
+            {"name": claim["name"]} for claim in resolved.resource_claims
+        ]
+    if role.resources.gpus > 0 and accelerator.device_class_name is not None:
+        template_name = accelerator_claim_template_name(
+            workload_name,
+            device_class_name=accelerator.device_class_name,
+            count=role.resources.gpus,
+        )
+        attach_accelerator_claim(
+            pod_spec,
+            vllm_container,
+            template_name=template_name,
+        )
     if accelerator.node_selector:
         pod_spec["nodeSelector"] = dict(accelerator.node_selector)
     if cluster.openshift.scc:
@@ -291,9 +309,6 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
         pod_spec["dnsConfig"] = cluster.pod_defaults.dns_config
     if init_containers:
         pod_spec["initContainers"] = init_containers
-    if resolved.resource_claims:
-        pod_spec["resourceClaims"] = resolved.resource_claims
-
     if resolved.features.workload_kind == WorkloadKind.DEPLOYMENT:
         selector = instance.pod_selector(role.name)
         workload = Workload(
@@ -348,3 +363,34 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
         ),
     )
     return render_controller_workload(workload)[0]
+
+
+def role_workload_name(instance: Instance, role: RoleSpec) -> str:
+    return (
+        instance.user_scoped_name(role.workload_name)
+        if role.workload_name
+        else instance.name(role.name)
+    )
+
+
+def render_accelerator_claim_template(
+    spec: DeploymentSpec,
+    instance: Instance,
+    cluster: Cluster,
+    role: RoleSpec,
+) -> dict | None:
+    accelerator = spec.accelerator_config(cluster)
+    if role.resources.gpus <= 0 or accelerator.device_class_name is None:
+        return None
+    workload_name = role_workload_name(instance, role)
+    template_name = accelerator_claim_template_name(
+        workload_name,
+        device_class_name=accelerator.device_class_name,
+        count=role.resources.gpus,
+    )
+    return render_dra_claim_template(
+        name=template_name,
+        labels=instance.labels("accelerator-claim-template", role.name),
+        device_class_name=accelerator.device_class_name,
+        count=role.resources.gpus,
+    )

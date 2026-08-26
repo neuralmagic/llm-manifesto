@@ -16,6 +16,11 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .cluster import Cluster
+from .dra import (
+    accelerator_claim_template_name,
+    attach_accelerator_claim,
+    render_accelerator_claim_template,
+)
 
 KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
 KUEUE_PRIORITY_LABEL = "kueue.x-k8s.io/priority-class"
@@ -133,8 +138,21 @@ def load_workload(path: str | Path) -> Workload:
 class WorkloadAccelerator(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    resource_name: str
+    resource_name: str | None = None
+    device_class_name: str | None = None
     node_selector: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def require_one_allocation_backend(self) -> "WorkloadAccelerator":
+        configured = sum(
+            value is not None for value in (self.resource_name, self.device_class_name)
+        )
+        if configured != 1:
+            raise ValueError(
+                "workload accelerator must define exactly one of resource_name or "
+                "device_class_name"
+            )
+        return self
 
 
 class WorkloadPodDefaults(BaseModel):
@@ -180,6 +198,7 @@ def workload_settings(cluster: Cluster) -> WorkloadSettings:
         accelerators={
             name: WorkloadAccelerator(
                 resource_name=accelerator.resource_name,
+                device_class_name=accelerator.device_class_name,
                 node_selector=copy.deepcopy(accelerator.node_selector),
             )
             for name, accelerator in cluster.accelerators.profiles.items()
@@ -205,8 +224,11 @@ def render_workload(
     """Lower workload intent to Kubernetes objects without contacting a cluster."""
 
     pod_template = workload.pod_template.model_dump(mode="python")
+    accelerator_claim_template = None
     if settings is not None:
-        _apply_settings(pod_template, settings, accelerator, workload)
+        accelerator_claim_template = _apply_settings(
+            pod_template, settings, accelerator, workload
+        )
     if not pod_template["metadata"].get("annotations"):
         pod_template["metadata"].pop("annotations", None)
 
@@ -231,6 +253,8 @@ def render_workload(
                 default_selector=resolved_selector,
             )
         )
+    if accelerator_claim_template is not None:
+        objects.append(accelerator_claim_template)
 
     if workload.backend == WorkloadBackend.JOB:
         objects.append(_render_job(workload, workload_labels, pod_template))
@@ -294,7 +318,7 @@ def _apply_settings(
     settings: WorkloadSettings,
     accelerator: str | None,
     workload: Workload,
-) -> None:
+) -> dict[str, Any] | None:
     pod_metadata = pod_template["metadata"]
     annotations = dict(settings.pod.annotations) | pod_metadata["annotations"]
     if annotations:
@@ -341,10 +365,30 @@ def _apply_settings(
                 "accelerator_container is required when a GPU workload has "
                 "multiple containers"
             )
-        resources = container.setdefault("resources", {})
-        value = str(workload.accelerator_count)
-        resources.setdefault("requests", {})[selected.resource_name] = value
-        resources.setdefault("limits", {})[selected.resource_name] = value
+        if selected.resource_name is not None:
+            resources = container.setdefault("resources", {})
+            value = str(workload.accelerator_count)
+            resources.setdefault("requests", {})[selected.resource_name] = value
+            resources.setdefault("limits", {})[selected.resource_name] = value
+        else:
+            assert selected.device_class_name is not None
+            template_name = accelerator_claim_template_name(
+                workload.name,
+                device_class_name=selected.device_class_name,
+                count=workload.accelerator_count,
+            )
+            attach_accelerator_claim(
+                pod_spec,
+                container,
+                template_name=template_name,
+            )
+            return render_accelerator_claim_template(
+                name=template_name,
+                labels=workload.metadata.labels,
+                device_class_name=selected.device_class_name,
+                count=workload.accelerator_count,
+            )
+    return None
 
 
 def _metadata(workload: Workload, labels: dict[str, str]) -> dict[str, Any]:
