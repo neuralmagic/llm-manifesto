@@ -421,10 +421,22 @@ vllm-envs worktree cannot be selected unless its absolute path is covered by a
 model-pod volume mount.
 
 Manifesto also omits Kubernetes fields whose defaults are sufficient. Set
-`pod_defaults.image_pull_policy`, `termination_grace_period_seconds`,
-`working_dir`, or `container_security_context` only when cluster or image
-policy requires an explicit value. A dedicated model-server ServiceAccount is
-generated only when an OpenShift SCC must be bound to it.
+`pod_defaults.image_pull_secrets`, `image_pull_policy`,
+`termination_grace_period_seconds`, `working_dir`, or
+`container_security_context` only when cluster or image policy requires an
+explicit value. Pull secrets are existing Secret names in the workload
+namespace; Manifesto references them but does not create credential data. They
+are attached to every generated PodSpec, including routing and idle-shutdown
+pods. For example:
+
+```yaml
+pod_defaults:
+  image_pull_secrets:
+    - example-registry-credentials
+```
+
+A dedicated model-server ServiceAccount is generated only when an OpenShift
+SCC must be bound to it.
 
 Cluster profiles own environment that should not be repeated in every model
 spec:

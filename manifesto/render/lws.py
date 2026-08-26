@@ -226,6 +226,8 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
         pod_metadata["annotations"] = annotations
 
     pod_spec = {"volumes": volumes, "containers": [vllm_container, *containers]}
+    if cluster.pod_defaults.image_pull_secrets:
+        pod_spec["imagePullSecrets"] = cluster.pod_defaults.image_pull_secret_refs()
     if accelerator.node_selector:
         pod_spec["nodeSelector"] = dict(accelerator.node_selector)
     if cluster.openshift.scc:
