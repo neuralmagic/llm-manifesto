@@ -138,6 +138,7 @@ def test_stateless_single_rank_render_omits_filesystem_and_distributed_baggage()
         assert omitted not in container
     assert "serviceAccountName" not in pod_spec
     assert "terminationGracePeriodSeconds" not in pod_spec
+    assert "imagePullSecrets" not in pod_spec
 
 
 def test_vllm_env_requires_an_absolute_mounted_path():
@@ -618,6 +619,39 @@ def test_gateway_class_comes_from_cluster_profile():
         for obj in objects
     )
     assert yaml.safe_load(gateway_options["data"]["service"])["spec"]["type"] == "ClusterIP"
+
+
+def test_cluster_pull_secrets_are_attached_to_every_generated_pod():
+    cluster = CLUSTER.model_copy(deep=True)
+    cluster.pod_defaults.image_pull_secrets = [
+        "example-registry-credentials",
+        "backup.example.com",
+    ]
+    spec = load_spec(ROOT / "models" / DEEPSEEK, cluster)
+    spec.routing.frontend = RoutingFrontend.GATEWAY
+
+    objects = render(spec, user="tester", cluster=cluster)
+
+    expected = [
+        {"name": "example-registry-credentials"},
+        {"name": "backup.example.com"},
+    ]
+    pod_specs = [
+        obj["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"]
+        for obj in objects
+        if obj["kind"] == "LeaderWorkerSet"
+    ]
+    pod_specs.extend(
+        obj["spec"]["template"]["spec"]
+        for obj in objects
+        if obj["kind"] == "Deployment"
+    )
+    assert pod_specs
+    assert all(pod_spec["imagePullSecrets"] == expected for pod_spec in pod_specs)
+
+    gateway_options = _find(objects, "ConfigMap", "gateway-options")
+    gateway_deployment = yaml.safe_load(gateway_options["data"]["deployment"])
+    assert gateway_deployment["spec"]["template"]["spec"]["imagePullSecrets"] == expected
 
 
 def test_standalone_is_the_default_and_routing_only_refreshes_idle_shutdown():

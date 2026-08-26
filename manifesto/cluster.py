@@ -107,9 +107,27 @@ class PodDefaults(BaseModel):
     extra_volumes: list[dict[str, Any]] = Field(default_factory=list)
     extra_volume_mounts: list[dict[str, Any]] = Field(default_factory=list)
     container_security_context: dict[str, Any] | None = None
+    image_pull_secrets: list[str] = Field(default_factory=list)
     image_pull_policy: Literal["Always", "IfNotPresent", "Never"] | None = None
     termination_grace_period_seconds: int | None = Field(None, ge=0)
     working_dir: str | None = None
+
+    @field_validator("image_pull_secrets")
+    @classmethod
+    def require_secret_names(cls, value: list[str]) -> list[str]:
+        for name in value:
+            if len(name) > 253 or not re.fullmatch(
+                r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?"
+                r"(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*",
+                name,
+            ) or any(len(label) > 63 for label in name.split(".")):
+                raise ValueError(
+                    "image_pull_secrets entries must be Kubernetes Secret names"
+                )
+        return value
+
+    def image_pull_secret_refs(self) -> list[dict[str, str]]:
+        return [{"name": name} for name in self.image_pull_secrets]
 
 
 class AcceleratorConfig(BaseModel):

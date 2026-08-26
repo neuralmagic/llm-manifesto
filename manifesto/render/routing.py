@@ -470,6 +470,10 @@ def render_routing(spec: DeploymentSpec, instance: Instance, cluster: Cluster) -
             },
         },
     }
+    if cluster.pod_defaults.image_pull_secrets:
+        deployment_spec["template"]["spec"]["imagePullSecrets"] = (
+            cluster.pod_defaults.image_pull_secret_refs()
+        )
     if standalone:
         deployment_spec["template"]["spec"]["terminationGracePeriodSeconds"] = 130
 
@@ -575,6 +579,22 @@ def render_routing(spec: DeploymentSpec, instance: Instance, cluster: Cluster) -
         return objects
 
     gateway_resource_name = gateway_name(instance, cluster)
+    gateway_pod_spec = {
+        "containers": [
+            {
+                "name": "istio-proxy",
+                "resources": {
+                    "requests": {"cpu": "8", "memory": "64Gi"},
+                    "limits": {"cpu": "8", "memory": "64Gi"},
+                },
+            }
+        ]
+    }
+    if cluster.pod_defaults.image_pull_secrets:
+        gateway_pod_spec["imagePullSecrets"] = (
+            cluster.pod_defaults.image_pull_secret_refs()
+        )
+
     objects.extend(
         [
         {
@@ -586,17 +606,7 @@ def render_routing(spec: DeploymentSpec, instance: Instance, cluster: Cluster) -
                     {
                         "spec": {
                             "template": {
-                                "spec": {
-                                    "containers": [
-                                        {
-                                            "name": "istio-proxy",
-                                            "resources": {
-                                                "requests": {"cpu": "8", "memory": "64Gi"},
-                                                "limits": {"cpu": "8", "memory": "64Gi"},
-                                            },
-                                        }
-                                    ]
-                                }
+                                "spec": gateway_pod_spec
                             }
                         }
                     },

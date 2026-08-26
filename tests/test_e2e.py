@@ -230,6 +230,7 @@ def test_e2e_probe_inherits_cluster_placement_and_dns():
     cluster.pod_defaults.tolerations = [{"key": "gpu", "operator": "Exists"}]
     cluster.pod_defaults.dns_policy = "ClusterFirst"
     cluster.pod_defaults.dns_config = {"options": [{"name": "ndots", "value": "2"}]}
+    cluster.pod_defaults.image_pull_secrets = ["example-registry-credentials"]
 
     job = e2e_workflow.render_probe_job(
         name="test-e2e",
@@ -245,6 +246,9 @@ def test_e2e_probe_inherits_cluster_placement_and_dns():
     assert pod_spec["tolerations"] == cluster.pod_defaults.tolerations
     assert pod_spec["dnsPolicy"] == "ClusterFirst"
     assert pod_spec["dnsConfig"] == cluster.pod_defaults.dns_config
+    assert pod_spec["imagePullSecrets"] == [
+        {"name": "example-registry-credentials"}
+    ]
 
 
 def test_e2e_rejects_pvc_extra_volumes():

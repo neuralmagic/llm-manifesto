@@ -147,6 +147,7 @@ class WorkloadPodDefaults(BaseModel):
         Literal["ClusterFirst", "Default", "ClusterFirstWithHostNet", "None"] | None
     ) = None
     dns_config: dict[str, Any] = Field(default_factory=dict)
+    image_pull_secrets: list[str] = Field(default_factory=list)
     image_pull_policy: Literal["Always", "IfNotPresent", "Never"] | None = None
 
 
@@ -191,6 +192,7 @@ def workload_settings(cluster: Cluster) -> WorkloadSettings:
             tolerations=copy.deepcopy(pod.tolerations),
             dns_policy=pod.dns_policy,
             dns_config=copy.deepcopy(pod.dns_config),
+            image_pull_secrets=list(pod.image_pull_secrets),
             image_pull_policy=pod.image_pull_policy,
         ),
     )
@@ -314,6 +316,14 @@ def _apply_settings(
         pod_spec.setdefault("dnsPolicy", settings.pod.dns_policy)
     if settings.pod.dns_config:
         pod_spec.setdefault("dnsConfig", copy.deepcopy(settings.pod.dns_config))
+    if settings.pod.image_pull_secrets:
+        configured = [{"name": name} for name in settings.pod.image_pull_secrets]
+        existing = pod_spec.get("imagePullSecrets", [])
+        seen = {item.get("name") for item in configured}
+        pod_spec["imagePullSecrets"] = [
+            *configured,
+            *(item for item in existing if item.get("name") not in seen),
+        ]
     if settings.pod.image_pull_policy:
         for field_name in ("initContainers", "containers"):
             for container in pod_spec.get(field_name, []):

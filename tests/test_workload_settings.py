@@ -30,6 +30,7 @@ def test_workload_settings_project_only_portable_cluster_policy():
     cluster.kueue.local_queue = "benchmark-queue"
     cluster.pod_defaults.annotations = {"example.com/pool": "gpu"}
     cluster.pod_defaults.tolerations = [{"key": "gpu", "operator": "Exists"}]
+    cluster.pod_defaults.image_pull_secrets = ["example-registry-credentials"]
     cluster.accelerators.profiles["gb200"].node_selector["gpu.product"] = "GB200"
 
     settings = workload_settings(cluster)
@@ -39,6 +40,7 @@ def test_workload_settings_project_only_portable_cluster_policy():
     assert settings.accelerator("any").node_selector == {"gpu.product": "GB200"}
     assert settings.pod.annotations == {"example.com/pool": "gpu"}
     assert settings.pod.tolerations == [{"key": "gpu", "operator": "Exists"}]
+    assert settings.pod.image_pull_secrets == ["example-registry-credentials"]
     assert "storage" not in settings.model_dump()
     assert "fabric" not in settings.model_dump()
 
@@ -63,6 +65,7 @@ def test_job_renderer_owns_queue_placement_and_optional_headless_service():
     cluster = load_cluster(ROOT / "clusters" / "example-gb200.yaml")
     cluster.pod_defaults.annotations = {"example.com/pool": "gpu"}
     cluster.pod_defaults.tolerations = [{"key": "gpu", "operator": "Exists"}]
+    cluster.pod_defaults.image_pull_secrets = ["example-registry-credentials"]
     cluster.accelerators.profiles["gb200"].node_selector["gpu.product"] = "GB200"
     workload = Workload(
         name="benchmark-run",
@@ -72,6 +75,7 @@ def test_job_renderer_owns_queue_placement_and_optional_headless_service():
             metadata=WorkloadMetadata(labels={"app": "benchmark", "run": "one"}),
             spec={
                 "restartPolicy": "Never",
+                "imagePullSecrets": [{"name": "workload-registry-credentials"}],
                 "containers": [{"name": "worker", "image": "worker:test"}],
             },
         ),
@@ -119,6 +123,10 @@ def test_job_renderer_owns_queue_placement_and_optional_headless_service():
     assert pod_template["metadata"]["annotations"] == {"example.com/pool": "gpu"}
     assert pod_template["spec"]["nodeSelector"] == {"gpu.product": "GB200"}
     assert pod_template["spec"]["tolerations"] == [{"key": "gpu", "operator": "Exists"}]
+    assert pod_template["spec"]["imagePullSecrets"] == [
+        {"name": "example-registry-credentials"},
+        {"name": "workload-registry-credentials"},
+    ]
     assert pod_template["spec"]["containers"][0]["resources"] == {
         "requests": {"nvidia.com/gpu": "2"},
         "limits": {"nvidia.com/gpu": "2"},
