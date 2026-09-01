@@ -9,7 +9,7 @@ from typing import Any
 
 from .cluster import Cluster
 from .equations import render_mapping
-from .features import FeatureContext, FeaturePlan, resolve_features
+from .features import FeatureContext, FeaturePlan, WorkloadKind, resolve_features
 from .instance import Instance
 from .dp_ports import RolePorts, derive_ports
 from .parallelism import ParallelLayout, parallel_layout
@@ -110,6 +110,14 @@ def resolve_role(spec: DeploymentSpec, instance: Instance, cluster: Cluster, rol
             llm_d_enabled=spec.routing.kind != RoutingKind.DISABLED,
             routing_proxy=role.routing_proxy,
             multi_node=role.lws.size > 1,
+            workload_kind=(
+                None
+                if role.workload == "auto"
+                else {
+                    "deployment": WorkloadKind.DEPLOYMENT,
+                    "leaderworkerset": WorkloadKind.LEADER_WORKER_SET,
+                }[role.workload]
+            ),
             kv_transfer_config=role.kv_transfer_config,
             all2all_backend=_optional_string(vllm_args.get("all2all_backend")),
             imex_resource_claim_template=cluster.fabric.imex_resource_claim_template,

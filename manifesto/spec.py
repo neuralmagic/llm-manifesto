@@ -167,6 +167,7 @@ class RoleSpec(BaseModel):
 
     name: str
     workload_name: str | None = None
+    workload: Literal["auto", "deployment", "leaderworkerset"] = "auto"
     lws: LwsSpec = Field(default_factory=LwsSpec)
     parallelism: ParallelismSpec = Field(default_factory=ParallelismSpec)
     profiling: ProfilingSpec = Field(default_factory=ProfilingSpec)
