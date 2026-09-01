@@ -224,7 +224,11 @@ roles:
 arguments are derived from the workload size and GPUs per pod. GPUs per pod is
 inferred from the parallel layout and the cluster profile; set
 `parallelism.gpus` to override it. Single-node roles render as Kubernetes
-Deployments; roles spanning multiple nodes render as LeaderWorkerSets.
+Deployments; roles spanning multiple nodes render as LeaderWorkerSets. Set a
+role's `workload` to `deployment` or `leaderworkerset` to override that default.
+An explicit one-node LeaderWorkerSet can be useful when an admission controller
+integrates with LeaderWorkerSet rather than Deployment. Multi-node roles cannot
+select Deployment.
 
 Unknown role keys are rejected at load time, so typos fail loudly instead of
 being silently ignored.

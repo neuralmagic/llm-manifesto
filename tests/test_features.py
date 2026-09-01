@@ -24,6 +24,7 @@ def _context(**overrides) -> FeatureContext:
         "llm_d_enabled": False,
         "routing_proxy": False,
         "multi_node": False,
+        "workload_kind": None,
         "kv_transfer_config": None,
         "all2all_backend": None,
         "imex_resource_claim_template": None,
@@ -100,6 +101,24 @@ def test_multi_node_shape_selects_leader_worker_set_without_becoming_feature():
     assert single.workload_kind == WorkloadKind.DEPLOYMENT
     assert multi.workload_kind == WorkloadKind.LEADER_WORKER_SET
     assert multi.enabled == single.enabled
+
+
+def test_explicit_workload_kind_overrides_single_node_default():
+    plan = resolve_features(
+        _context(workload_kind=WorkloadKind.LEADER_WORKER_SET)
+    )
+
+    assert plan.workload_kind == WorkloadKind.LEADER_WORKER_SET
+
+
+def test_multi_node_role_rejects_explicit_deployment():
+    with pytest.raises(ValueError, match="multi-node roles require a LeaderWorkerSet"):
+        resolve_features(
+            _context(
+                multi_node=True,
+                workload_kind=WorkloadKind.DEPLOYMENT,
+            )
+        )
 
 
 def test_deepep_is_reported_as_all2all_backend_not_feature():

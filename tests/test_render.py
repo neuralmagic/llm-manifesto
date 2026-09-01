@@ -870,6 +870,24 @@ def test_single_node_dp_uses_deployment_without_lws_environment():
     assert "--data-parallel-address 127.0.0.1" in script
 
 
+def test_single_node_role_can_force_leader_worker_set():
+    spec = load_spec(ROOT / "models" / "qwen" / "h200-aggregated.yaml", EXAMPLE_H200)
+    spec.role("decode").workload = "leaderworkerset"
+
+    objects = render(spec, user="tester", cluster=EXAMPLE_H200)
+
+    workload = _find(objects, "LeaderWorkerSet", "decode")
+    assert workload["spec"]["leaderWorkerTemplate"]["size"] == 1
+    assert not any(
+        obj["kind"] == "Deployment"
+        and obj.get("metadata", {}).get("labels", {}).get(
+            "app.kubernetes.io/component"
+        )
+        == "model-server"
+        for obj in objects
+    )
+
+
 def test_pd_inferencepool_selector_includes_prefill_and_decode_roles():
     objects = _objects(DEEPSEEK)
     infpool = _find(objects, "InferencePool")

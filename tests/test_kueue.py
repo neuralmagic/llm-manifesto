@@ -144,6 +144,24 @@ def test_single_node_aggregate_remains_deployment_with_independent_pod_admission
     )
 
 
+def test_single_node_role_can_use_lws_queue_admission():
+    cluster = load_cluster(CLUSTER_PATH)
+    cluster.kueue.local_queue = QUEUE
+    spec = load_spec(ROOT / "models" / "qwen/aggregated.yaml", cluster)
+    spec.role("decode").workload = "leaderworkerset"
+
+    objects = render(spec, user="tester", cluster=cluster)
+
+    workload = _find(objects, "LeaderWorkerSet", "decode")
+    assert workload["metadata"]["labels"][KUEUE_QUEUE_LABEL] == QUEUE
+    assert workload["spec"]["leaderWorkerTemplate"]["size"] == 1
+    assert (
+        KUEUE_QUEUE_LABEL
+        not in workload["spec"]["leaderWorkerTemplate"]["workerTemplate"]
+        ["metadata"]["labels"]
+    )
+
+
 def test_single_node_pd_roles_remain_independently_admitted_deployments():
     model = ROOT / "models" / "deepseek-v4/1P-EP8-1D-EP8.yaml"
     renders = {}

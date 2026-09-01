@@ -2,6 +2,9 @@
 
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from manifesto.cluster import load_cluster
 from manifesto.instance import Instance
 from manifesto.parallelism import parallel_layout
@@ -66,6 +69,14 @@ def test_role_schema_accepts_raw_vllm_args():
     )
 
     assert role.vllm_raw_args == ["--trust-remote-code", "--custom.flag=value"]
+
+
+def test_role_schema_accepts_only_known_workload_controllers():
+    role = RoleSpec.model_validate({"name": "decode", "workload": "leaderworkerset"})
+
+    assert role.workload == "leaderworkerset"
+    with pytest.raises(ValidationError, match="workload"):
+        RoleSpec.model_validate({"name": "decode", "workload": "statefulset"})
 
 
 def test_fabric_profiles_are_cluster_config_driven():

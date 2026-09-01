@@ -49,6 +49,7 @@ class FeatureContext:
     llm_d_enabled: bool
     routing_proxy: bool
     multi_node: bool
+    workload_kind: WorkloadKind | None
     kv_transfer_config: dict[str, Any] | None
     all2all_backend: str | None
     imex_resource_claim_template: str | None
@@ -150,6 +151,10 @@ def resolve_features(context: FeatureContext) -> FeaturePlan:
             f"{context.role_name}: llm-d external DP is incompatible with "
             "api_server_count > 1"
         )
+    if context.multi_node and context.workload_kind == WorkloadKind.DEPLOYMENT:
+        raise ValueError(
+            f"{context.role_name}: multi-node roles require a LeaderWorkerSet"
+        )
 
     connectors = connector_backends(context.kv_transfer_config)
     backends = {f"connector:{connector}" for connector in connectors}
@@ -171,7 +176,8 @@ def resolve_features(context: FeatureContext) -> FeaturePlan:
     return FeaturePlan(
         enabled=frozenset(enabled),
         backends=frozenset(backends),
-        workload_kind=(
+        workload_kind=context.workload_kind
+        or (
             WorkloadKind.LEADER_WORKER_SET
             if context.multi_node
             else WorkloadKind.DEPLOYMENT
