@@ -20,7 +20,11 @@ def _custom_cluster(*, scc: str | None = None) -> Cluster:
                 "default": "test",
                 "profiles": {
                     "test": {
-                        "resource_name": "example.com/gpu",
+                        "allocation": {
+                            "extended_resource": {
+                                "resource_name": "example.com/gpu"
+                            }
+                        },
                         "presence_label": "example.com/gpu.present",
                         "gpu_arch": "test",
                         "torch_cuda_arch_list": "12.3",

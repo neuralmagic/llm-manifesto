@@ -130,14 +130,10 @@ class PodDefaults(BaseModel):
         return [{"name": name} for name in self.image_pull_secrets]
 
 
-class AcceleratorConfig(BaseModel):
+class ExtendedResourceAllocationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     resource_name: str
-    presence_label: str
-    node_selector: dict[str, str] = Field(default_factory=dict)
-    gpu_arch: str
-    torch_cuda_arch_list: str
 
     @field_validator("resource_name")
     @classmethod
@@ -152,6 +148,63 @@ class AcceleratorConfig(BaseModel):
                 f"resource such as 'nvidia.com/gpu', got {value!r}"
             )
         return value
+
+
+class DraAllocationConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    device_class_name: str
+
+    @field_validator("device_class_name")
+    @classmethod
+    def require_device_class_name(cls, value: str) -> str:
+        if len(value) > 253 or not re.fullmatch(
+            r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?", value
+        ):
+            raise ValueError(
+                "accelerator device_class_name must be a Kubernetes DNS "
+                f"subdomain such as 'gpu.nvidia.com', got {value!r}"
+            )
+        return value
+
+
+class AcceleratorAllocationConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    extended_resource: ExtendedResourceAllocationConfig | None = None
+    dra: DraAllocationConfig | None = None
+
+    @model_validator(mode="after")
+    def require_one_allocation_backend(self) -> "AcceleratorAllocationConfig":
+        configured = sum(
+            value is not None for value in (self.extended_resource, self.dra)
+        )
+        if configured != 1:
+            raise ValueError(
+                "accelerator allocation must define exactly one of "
+                "extended_resource or dra"
+            )
+        return self
+
+
+class AcceleratorConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    allocation: AcceleratorAllocationConfig
+    presence_label: str
+    node_selector: dict[str, str] = Field(default_factory=dict)
+    gpu_arch: str
+    torch_cuda_arch_list: str
+
+    @property
+    def resource_name(self) -> str | None:
+        backend = self.allocation.extended_resource
+        return backend.resource_name if backend is not None else None
+
+    @property
+    def device_class_name(self) -> str | None:
+        backend = self.allocation.dra
+        return backend.device_class_name if backend is not None else None
 
 
 class AcceleratorsConfig(BaseModel):

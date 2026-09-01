@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 from manifesto.cli import _build_parser, main
-from manifesto.cluster import load_cluster
+from manifesto.cluster import Cluster, load_cluster
 from manifesto.overrides import load_routing_profile
 from manifesto.render import render
 from manifesto.spec import RoutingFrontend, load_spec
@@ -1002,6 +1002,92 @@ def test_gateway_deploy_prunes_obsolete_envoy_config(monkeypatch):
         "configmaps/old-envoy-config",
         "--ignore-not-found=true",
     ]]
+
+
+def test_deploy_cleanup_prunes_only_superseded_dra_templates(monkeypatch):
+    cluster_data = yaml.safe_load(CLUSTER.read_text())
+    profile = cluster_data["accelerators"]["profiles"]["gb200"]
+    profile["allocation"] = {
+        "dra": {"device_class_name": "gpu.nvidia.com"}
+    }
+    cluster = Cluster.model_validate(cluster_data)
+    spec = load_spec(MODEL, cluster)
+    objects = render(spec, user="tester", cluster=cluster)
+    desired = next(
+        obj for obj in objects if obj["kind"] == "ResourceClaimTemplate"
+    )
+    labels = desired["metadata"]["labels"]
+    live = [
+        workflow.LiveResource(
+            api_version="resource.k8s.io/v1",
+            kind="ResourceClaimTemplate",
+            name=desired["metadata"]["name"],
+            labels=labels,
+        ),
+        workflow.LiveResource(
+            api_version="resource.k8s.io/v1",
+            kind="ResourceClaimTemplate",
+            name="obsolete-accelerator-template",
+            labels=labels,
+        ),
+    ]
+    calls = []
+    monkeypatch.setattr(
+        workflow, "discover_live_resources", lambda *_args, **_kwargs: live
+    )
+    monkeypatch.setattr(
+        workflow, "run", lambda cmd, **_kwargs: calls.append(cmd) or 0
+    )
+    config = workflow.RuntimeConfig("tester", "workload-ns", None, Path("/tmp/out"))
+
+    assert (
+        workflow.cleanup_obsolete_accelerator_claim_templates(config, objects) == 0
+    )
+    assert calls == [
+        [
+            "kubectl",
+            "-n",
+            "workload-ns",
+            "delete",
+            "resourceclaimtemplates.resource.k8s.io/obsolete-accelerator-template",
+            "--ignore-not-found=true",
+        ]
+    ]
+
+
+def test_dra_preflight_checks_api_and_device_class(monkeypatch):
+    cluster_data = yaml.safe_load(CLUSTER.read_text())
+    profile = cluster_data["accelerators"]["profiles"]["gb200"]
+    profile["allocation"] = {
+        "dra": {"device_class_name": "gpu.nvidia.com"}
+    }
+    cluster = Cluster.model_validate(cluster_data)
+    spec = load_spec(STANDALONE_MODEL, cluster)
+    objects = render(spec, user="tester", cluster=cluster)
+    calls = []
+
+    def fake_capture(cmd, **_kwargs):
+        calls.append(cmd)
+        if "/apis/resource.k8s.io/v1" in cmd:
+            return json.dumps(
+                {
+                    "resources": [
+                        {"name": "deviceclasses"},
+                        {"name": "resourceclaimtemplates"},
+                    ]
+                }
+            )
+        if "deviceclass" in cmd:
+            return '{"metadata":{"name":"gpu.nvidia.com"}}'
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(workflow, "capture", fake_capture)
+    config = workflow.RuntimeConfig("tester", "workload-ns", None, Path("/tmp/out"))
+
+    workflow.preflight_workloads(config, objects)
+
+    assert any("/apis/resource.k8s.io/v1" in cmd for cmd in calls)
+    assert any("deviceclass" in cmd and "gpu.nvidia.com" in cmd for cmd in calls)
 
 
 def test_bootstrap_applies_profile_namespace_prerequisites(monkeypatch, tmp_path):

@@ -37,6 +37,7 @@ HF_SECRET_NAME = "hf-secret"
 HF_SECRET_KEY = "HF_TOKEN"
 KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
 LWS_RESOURCE_TYPE = "leaderworkersets.leaderworkerset.x-k8s.io"
+DRA_RESOURCE_CLAIM_TEMPLATE_TYPE = "resourceclaimtemplates.resource.k8s.io"
 KUEUE_REQUIRED_RESOURCE_TYPES = {
     "localqueues.kueue.x-k8s.io",
     "clusterqueues.kueue.x-k8s.io",
@@ -55,6 +56,7 @@ MANAGED_RESOURCE_TYPES = {
     ("gateway.networking.k8s.io/v1", "HTTPRoute"): "httproutes.gateway.networking.k8s.io",
     ("inference.networking.k8s.io/v1", "InferencePool"): "inferencepools.inference.networking.k8s.io",
     ("leaderworkerset.x-k8s.io/v1", "LeaderWorkerSet"): "leaderworkersets.leaderworkerset.x-k8s.io",
+    ("resource.k8s.io/v1", "ResourceClaimTemplate"): DRA_RESOURCE_CLAIM_TEMPLATE_TYPE,
     ("networking.istio.io/v1", "DestinationRule"): "destinationrules.networking.istio.io",
     ("rbac.authorization.k8s.io/v1", "Role"): "roles.rbac.authorization.k8s.io",
     ("rbac.authorization.k8s.io/v1", "RoleBinding"): "rolebindings.rbac.authorization.k8s.io",
@@ -565,11 +567,57 @@ def deploy(
     rc = run([*config.kubectl(), "apply", "-f", "-"], input_text=manifest)
     if rc:
         return rc
-    return cleanup_obsolete_routing(config, parse_manifest(manifest))
+    objects = parse_manifest(manifest)
+    return cleanup_obsolete_routing(config, objects)
+
+
+def cleanup_obsolete_accelerator_claim_templates(
+    config: RuntimeConfig,
+    objects: list[dict],
+) -> int:
+    """Prune immutable DRA templates superseded by a successful deployment."""
+
+    workloads = _model_workloads(objects)
+    if not workloads:
+        return 0
+    instance_ids = {
+        workload.get("metadata", {})
+        .get("labels", {})
+        .get("app.kubernetes.io/instance")
+        for workload in workloads
+    } - {None}
+    if len(instance_ids) != 1:
+        return 0
+    instance_id = next(iter(instance_ids))
+    desired_names = {
+        obj["metadata"]["name"]
+        for obj in objects
+        if obj.get("apiVersion") == "resource.k8s.io/v1"
+        and obj.get("kind") == "ResourceClaimTemplate"
+    }
+    live = discover_live_resources(
+        config,
+        instance_id=instance_id,
+        resource_types=(DRA_RESOURCE_CLAIM_TEMPLATE_TYPE,),
+    )
+    obsolete = [resource for resource in live if resource.name not in desired_names]
+    if not obsolete:
+        return 0
+    return run(
+        [
+            *config.kubectl(),
+            "delete",
+            *(resource.kubectl_ref for resource in obsolete),
+            "--ignore-not-found=true",
+        ]
+    )
 
 
 def cleanup_obsolete_routing(config: RuntimeConfig, objects: list[dict]) -> int:
     """Delete resources left behind when an instance changes routing frontend."""
+    rc = cleanup_obsolete_accelerator_claim_templates(config, objects)
+    if rc:
+        return rc
     routing_objects = [
         obj
         for obj in objects
@@ -744,6 +792,67 @@ def preflight_workloads(config: RuntimeConfig, objects: list[dict]) -> None:
     workloads = _model_workloads(objects)
     if not workloads:
         return
+    claim_templates = [
+        obj
+        for obj in objects
+        if obj.get("apiVersion") == "resource.k8s.io/v1"
+        and obj.get("kind") == "ResourceClaimTemplate"
+    ]
+    if claim_templates:
+        try:
+            discovery = json.loads(
+                capture(
+                    [
+                        *config.kubectl_base(),
+                        "get",
+                        "--raw",
+                        "/apis/resource.k8s.io/v1",
+                    ]
+                )
+            )
+            served = {
+                resource.get("name")
+                for resource in discovery.get("resources", [])
+                if isinstance(resource, dict)
+            }
+        except (WorkflowError, json.JSONDecodeError, AttributeError) as exc:
+            raise WorkflowError(
+                "workload preflight failed: resource.k8s.io/v1 is not served: "
+                f"{exc}"
+            ) from exc
+        missing = {"resourceclaimtemplates", "deviceclasses"} - served
+        if missing:
+            raise WorkflowError(
+                "workload preflight failed: required resource.k8s.io/v1 "
+                "resources are not served: "
+                + ", ".join(sorted(missing))
+            )
+        device_classes = {
+            request["exactly"]["deviceClassName"]
+            for template in claim_templates
+            for request in template["spec"]["spec"]["devices"]["requests"]
+        }
+        for device_class in sorted(device_classes):
+            print(
+                f"DRA preflight DeviceClass/{device_class}",
+                file=sys.stderr,
+            )
+            try:
+                capture(
+                    [
+                        *config.kubectl_base(),
+                        "get",
+                        "deviceclass",
+                        device_class,
+                        "-o",
+                        "json",
+                    ]
+                )
+            except WorkflowError as exc:
+                raise WorkflowError(
+                    "workload preflight failed: cannot read DeviceClass "
+                    f"{device_class}: {exc}"
+                ) from exc
     lws_objects = [obj for obj in workloads if obj["kind"] == "LeaderWorkerSet"]
     if lws_objects:
         served = _api_resources(config, "leaderworkerset.x-k8s.io")

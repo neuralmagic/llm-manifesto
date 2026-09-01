@@ -54,7 +54,7 @@ def test_workload_settings_reject_unknown_accelerator():
 def test_accelerator_resource_must_be_an_extended_resource():
     with pytest.raises(ValidationError, match="Kubernetes extended resource"):
         AcceleratorConfig(
-            resource_name="gpu",
+            allocation={"extended_resource": {"resource_name": "gpu"}},
             presence_label="example.com/gpu.present",
             gpu_arch="test",
             torch_cuda_arch_list="10.0",

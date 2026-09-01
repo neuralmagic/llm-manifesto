@@ -294,8 +294,56 @@ unless a spec needs an explicit one-off `model.image`.
 
 Each cluster profile declares its available accelerator profiles and a
 `default`. Specs inherit the selected cluster's default unless they set
-`accelerator`. The selected entry controls the Kubernetes accelerator resource,
-accelerator-specific cache path, and dev build architecture.
+`accelerator`. The selected entry controls accelerator allocation,
+accelerator-specific cache paths, and the development build architecture.
+
+For model authors, accelerator allocation is cluster-owned: model specs keep
+the same role GPU counts whether the cluster uses extended resources or Dynamic
+Resource Allocation (DRA). Only cluster operators select or change the backend.
+
+An extended-resource profile declares that backend explicitly:
+
+```yaml
+accelerators:
+  default: b200
+  profiles:
+    b200:
+      allocation:
+        extended_resource:
+          resource_name: nvidia.com/gpu
+      presence_label: nvidia.com/gpu.present
+      gpu_arch: b200
+      torch_cuda_arch_list: "10.0+PTX"
+```
+
+To use DRA instead, the cluster operator changes only `allocation`:
+
+```yaml
+    b200:
+      allocation:
+        dra:
+          device_class_name: gpu.nvidia.com
+      presence_label: nvidia.com/gpu.present
+      gpu_arch: b200
+      torch_cuda_arch_list: "10.0+PTX"
+```
+
+`allocation` must contain exactly one of `extended_resource` or `dra`.
+
+#### DRA operator requirements
+
+A DRA profile renders one `resource.k8s.io/v1` `ResourceClaimTemplate` for each
+GPU-bearing role. Each template requests the role's GPU count with `ExactCount`,
+and only the model container receives the resulting claim. CPU, memory,
+ephemeral storage, and RDMA remain ordinary container resources. Template names
+include a digest of the complete immutable claim specification, so a release
+can safely reuse a stable workload name when its claim metadata changes.
+
+The cluster must serve `resource.k8s.io/v1` and provide the configured
+`DeviceClass`. When Kueue is enabled, configure its DRA integration and a
+`deviceClassMappings` entry for that class, then give the mapped logical
+resource ClusterQueue quota. Manifesto verifies the DRA API and DeviceClass
+before deployment; Kueue remains authoritative for mapping and quota accounting.
 
 Manifesto applies shared vLLM arguments before role-specific `vllm:` and
 computed arguments. By default, Uvicorn access logs omit the high-frequency
@@ -496,8 +544,8 @@ settings = workload_settings(load_cluster("clusters/my-cluster.yaml"))
 accelerator = settings.accelerator("gb200")
 ```
 
-The portable projection contains only accelerator resource names and node
-selectors, the default Kueue LocalQueue, and pod placement defaults such as
+The portable projection contains accelerator resource or DeviceClass names and
+node selectors, the default Kueue LocalQueue, and pod placement defaults such as
 affinity, tolerations, DNS, annotations, and image pull policy. Storage,
 fabric configuration, and launch settings remain part of Manifesto's
 serving-specific cluster model.
