@@ -10,7 +10,9 @@ accelerators:
   default: h200
   profiles:
     h200:
-      resource_name: nvidia.com/gpu
+      allocation:
+        extended_resource:
+          resource_name: nvidia.com/gpu
       presence_label: nvidia.com/gpu.present
       gpu_arch: h200
       torch_cuda_arch_list: "9.0"

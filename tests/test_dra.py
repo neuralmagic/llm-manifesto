@@ -30,8 +30,9 @@ CLUSTER_PATH = ROOT / "clusters" / "example-gb200.yaml"
 def _dra_cluster() -> Cluster:
     data = yaml.safe_load(CLUSTER_PATH.read_text())
     profile = data["accelerators"]["profiles"]["gb200"]
-    profile.pop("resource_name")
-    profile["device_class_name"] = "gpu.nvidia.com"
+    profile["allocation"] = {
+        "dra": {"device_class_name": "gpu.nvidia.com"}
+    }
     return Cluster.model_validate(data)
 
 
@@ -77,12 +78,14 @@ def test_accelerator_requires_exactly_one_allocation_backend():
         "torch_cuda_arch_list": "10.0",
     }
     with pytest.raises(ValidationError, match="exactly one"):
-        AcceleratorConfig(**common)
+        AcceleratorConfig(**common, allocation={})
     with pytest.raises(ValidationError, match="exactly one"):
         AcceleratorConfig(
             **common,
-            resource_name="nvidia.com/gpu",
-            device_class_name="gpu.nvidia.com",
+            allocation={
+                "extended_resource": {"resource_name": "nvidia.com/gpu"},
+                "dra": {"device_class_name": "gpu.nvidia.com"},
+            },
         )
 
 
@@ -193,3 +196,25 @@ def test_immutable_template_name_changes_with_count():
     two = template_name(2)
     assert one != two
     assert len(one) <= 63
+
+
+def test_immutable_template_name_changes_with_claim_labels():
+    cluster = _dra_cluster()
+    settings = workload_settings(cluster)
+
+    def template_name(release: str) -> str:
+        workload = Workload(
+            name="stable-workload-name",
+            backend=WorkloadBackend.JOB,
+            metadata=WorkloadMetadata(labels={"app": "benchmark", "release": release}),
+            pod_template=PodTemplate(
+                spec={"containers": [{"name": "worker", "image": "worker:test"}]}
+            ),
+            accelerator_count=1,
+            job=JobPolicy(),
+        )
+        return render_shared_workload(workload, settings=settings)[0]["metadata"][
+            "name"
+        ]
+
+    assert template_name("one") != template_name("two")

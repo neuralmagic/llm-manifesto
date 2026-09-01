@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from typing import Any
 
@@ -16,12 +17,18 @@ RESOURCE_CLAIM_TEMPLATE_KIND = "ResourceClaimTemplate"
 def accelerator_claim_template_name(
     workload_name: str,
     *,
+    labels: dict[str, str],
     device_class_name: str,
     count: int,
 ) -> str:
     """Return a stable name that changes whenever the immutable claim spec does."""
 
-    identity = f"{DRA_API_VERSION}\0{device_class_name}\0{count}"
+    claim_spec = _accelerator_claim_template_spec(
+        labels=labels,
+        device_class_name=device_class_name,
+        count=count,
+    )
+    identity = json.dumps(claim_spec, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8]
     base = re.sub(r"[^a-z0-9-]+", "-", workload_name.lower()).strip("-")
     base = re.sub(r"-+", "-", base) or "workload"
@@ -39,30 +46,42 @@ def render_accelerator_claim_template(
     count: int,
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {"name": name}
-    claim_metadata: dict[str, Any] = {}
     if labels:
         metadata["labels"] = dict(labels)
-        claim_metadata["labels"] = dict(labels)
     return {
         "apiVersion": DRA_API_VERSION,
         "kind": RESOURCE_CLAIM_TEMPLATE_KIND,
         "metadata": metadata,
+        "spec": _accelerator_claim_template_spec(
+            labels=labels,
+            device_class_name=device_class_name,
+            count=count,
+        ),
+    }
+
+
+def _accelerator_claim_template_spec(
+    *,
+    labels: dict[str, str],
+    device_class_name: str,
+    count: int,
+) -> dict[str, Any]:
+    claim_metadata = {"labels": dict(labels)} if labels else None
+    return {
+        **({"metadata": claim_metadata} if claim_metadata else {}),
         "spec": {
-            **({"metadata": claim_metadata} if claim_metadata else {}),
-            "spec": {
-                "devices": {
-                    "requests": [
-                        {
-                            "name": DRA_REQUEST_NAME,
-                            "exactly": {
-                                "deviceClassName": device_class_name,
-                                "allocationMode": "ExactCount",
-                                "count": count,
-                            },
-                        }
-                    ]
-                }
-            },
+            "devices": {
+                "requests": [
+                    {
+                        "name": DRA_REQUEST_NAME,
+                        "exactly": {
+                            "deviceClassName": device_class_name,
+                            "allocationMode": "ExactCount",
+                            "count": count,
+                        },
+                    }
+                ]
+            }
         },
     }
 

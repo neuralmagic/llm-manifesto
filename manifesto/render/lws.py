@@ -234,8 +234,10 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
             {"name": claim["name"]} for claim in resolved.resource_claims
         ]
     if role.resources.gpus > 0 and accelerator.device_class_name is not None:
+        claim_labels = instance.labels("accelerator-claim-template", role.name)
         template_name = accelerator_claim_template_name(
             workload_name,
+            labels=claim_labels,
             device_class_name=accelerator.device_class_name,
             count=role.resources.gpus,
         )
@@ -383,14 +385,16 @@ def render_accelerator_claim_template(
     if role.resources.gpus <= 0 or accelerator.device_class_name is None:
         return None
     workload_name = role_workload_name(instance, role)
+    labels = instance.labels("accelerator-claim-template", role.name)
     template_name = accelerator_claim_template_name(
         workload_name,
+        labels=labels,
         device_class_name=accelerator.device_class_name,
         count=role.resources.gpus,
     )
     return render_dra_claim_template(
         name=template_name,
-        labels=instance.labels("accelerator-claim-template", role.name),
+        labels=labels,
         device_class_name=accelerator.device_class_name,
         count=role.resources.gpus,
     )

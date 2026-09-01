@@ -290,47 +290,56 @@ unless a spec needs an explicit one-off `model.image`.
 
 Each cluster profile declares its available accelerator profiles and a
 `default`. Specs inherit the selected cluster's default unless they set
-`accelerator`. The selected entry controls the Kubernetes accelerator resource,
-accelerator-specific cache path, and dev build architecture.
+`accelerator`. The selected entry controls accelerator allocation,
+accelerator-specific cache paths, and the development build architecture.
 
-Accelerator allocation is cluster-owned and swappable. Existing profiles use a
-Kubernetes extended resource:
+For model authors, accelerator allocation is cluster-owned: model specs keep
+the same role GPU counts whether the cluster uses extended resources or Dynamic
+Resource Allocation (DRA). Only cluster operators select or change the backend.
+
+An extended-resource profile declares that backend explicitly:
 
 ```yaml
 accelerators:
   default: b200
   profiles:
     b200:
-      resource_name: nvidia.com/gpu
+      allocation:
+        extended_resource:
+          resource_name: nvidia.com/gpu
       presence_label: nvidia.com/gpu.present
       gpu_arch: b200
       torch_cuda_arch_list: "10.0+PTX"
 ```
 
-To allocate the same role GPU counts through Dynamic Resource Allocation (DRA),
-replace `resource_name` with the cluster's `DeviceClass`:
+To use DRA instead, the cluster operator changes only `allocation`:
 
 ```yaml
     b200:
-      device_class_name: gpu.nvidia.com
+      allocation:
+        dra:
+          device_class_name: gpu.nvidia.com
       presence_label: nvidia.com/gpu.present
       gpu_arch: b200
       torch_cuda_arch_list: "10.0+PTX"
 ```
 
-Exactly one of `resource_name` or `device_class_name` is required. Model specs
-do not change when switching backends. DRA profiles render an instance-scoped
-`resource.k8s.io/v1` `ResourceClaimTemplate` for each GPU role, request the
-role's existing GPU count with `ExactCount`, and attach the resulting claim only
-to the model container. CPU, memory, ephemeral storage, and RDMA remain ordinary
-container resources.
+`allocation` must contain exactly one of `extended_resource` or `dra`.
 
-DRA rendering requires a cluster serving `resource.k8s.io/v1` and the named
-`DeviceClass`. When Kueue is enabled, its DRA integration and a
-`deviceClassMappings` entry for the class must also be configured; the mapped
-logical resource must have ClusterQueue quota. Manifesto verifies the DRA APIs
-and DeviceClass before deployment, while Kueue remains authoritative for the
-mapping and quota accounting.
+#### DRA operator requirements
+
+A DRA profile renders one `resource.k8s.io/v1` `ResourceClaimTemplate` for each
+GPU-bearing role. Each template requests the role's GPU count with `ExactCount`,
+and only the model container receives the resulting claim. CPU, memory,
+ephemeral storage, and RDMA remain ordinary container resources. Template names
+include a digest of the complete immutable claim specification, so a release
+can safely reuse a stable workload name when its claim metadata changes.
+
+The cluster must serve `resource.k8s.io/v1` and provide the configured
+`DeviceClass`. When Kueue is enabled, configure its DRA integration and a
+`deviceClassMappings` entry for that class, then give the mapped logical
+resource ClusterQueue quota. Manifesto verifies the DRA API and DeviceClass
+before deployment; Kueue remains authoritative for mapping and quota accounting.
 
 Manifesto applies shared vLLM arguments before role-specific `vllm:` and
 computed arguments. By default, Uvicorn access logs omit the high-frequency

@@ -1007,8 +1007,9 @@ def test_gateway_deploy_prunes_obsolete_envoy_config(monkeypatch):
 def test_deploy_cleanup_prunes_only_superseded_dra_templates(monkeypatch):
     cluster_data = yaml.safe_load(CLUSTER.read_text())
     profile = cluster_data["accelerators"]["profiles"]["gb200"]
-    profile.pop("resource_name")
-    profile["device_class_name"] = "gpu.nvidia.com"
+    profile["allocation"] = {
+        "dra": {"device_class_name": "gpu.nvidia.com"}
+    }
     cluster = Cluster.model_validate(cluster_data)
     spec = load_spec(MODEL, cluster)
     objects = render(spec, user="tester", cluster=cluster)
@@ -1057,8 +1058,9 @@ def test_deploy_cleanup_prunes_only_superseded_dra_templates(monkeypatch):
 def test_dra_preflight_checks_api_and_device_class(monkeypatch):
     cluster_data = yaml.safe_load(CLUSTER.read_text())
     profile = cluster_data["accelerators"]["profiles"]["gb200"]
-    profile.pop("resource_name")
-    profile["device_class_name"] = "gpu.nvidia.com"
+    profile["allocation"] = {
+        "dra": {"device_class_name": "gpu.nvidia.com"}
+    }
     cluster = Cluster.model_validate(cluster_data)
     spec = load_spec(STANDALONE_MODEL, cluster)
     objects = render(spec, user="tester", cluster=cluster)

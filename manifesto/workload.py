@@ -15,7 +15,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .cluster import Cluster
+from .cluster import AcceleratorAllocationConfig, Cluster
 from .dra import (
     accelerator_claim_template_name,
     attach_accelerator_claim,
@@ -138,21 +138,18 @@ def load_workload(path: str | Path) -> Workload:
 class WorkloadAccelerator(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    resource_name: str | None = None
-    device_class_name: str | None = None
+    allocation: AcceleratorAllocationConfig
     node_selector: dict[str, str] = Field(default_factory=dict)
 
-    @model_validator(mode="after")
-    def require_one_allocation_backend(self) -> "WorkloadAccelerator":
-        configured = sum(
-            value is not None for value in (self.resource_name, self.device_class_name)
-        )
-        if configured != 1:
-            raise ValueError(
-                "workload accelerator must define exactly one of resource_name or "
-                "device_class_name"
-            )
-        return self
+    @property
+    def resource_name(self) -> str | None:
+        backend = self.allocation.extended_resource
+        return backend.resource_name if backend is not None else None
+
+    @property
+    def device_class_name(self) -> str | None:
+        backend = self.allocation.dra
+        return backend.device_class_name if backend is not None else None
 
 
 class WorkloadPodDefaults(BaseModel):
@@ -197,8 +194,7 @@ def workload_settings(cluster: Cluster) -> WorkloadSettings:
         default_accelerator=cluster.accelerators.default,
         accelerators={
             name: WorkloadAccelerator(
-                resource_name=accelerator.resource_name,
-                device_class_name=accelerator.device_class_name,
+                allocation=accelerator.allocation,
                 node_selector=copy.deepcopy(accelerator.node_selector),
             )
             for name, accelerator in cluster.accelerators.profiles.items()
@@ -374,6 +370,7 @@ def _apply_settings(
             assert selected.device_class_name is not None
             template_name = accelerator_claim_template_name(
                 workload.name,
+                labels=workload.metadata.labels,
                 device_class_name=selected.device_class_name,
                 count=workload.accelerator_count,
             )
