@@ -41,6 +41,8 @@ logging:
 
 pod_defaults:
   shm_size: 2Gi
+  # image_pull_secrets:
+  #   - example-registry-credentials
 
 # Opt GPU serving workloads into a namespace LocalQueue by declaring, for example:
 # kueue:

@@ -171,6 +171,10 @@ def render_probe_job(
         pod_spec["dnsPolicy"] = cluster.pod_defaults.dns_policy
     if cluster.pod_defaults.dns_config:
         pod_spec["dnsConfig"] = copy.deepcopy(cluster.pod_defaults.dns_config)
+    if cluster.pod_defaults.image_pull_secrets:
+        pod_spec["imagePullSecrets"] = (
+            cluster.pod_defaults.image_pull_secret_refs()
+        )
 
     return {
         "apiVersion": "batch/v1",

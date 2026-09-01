@@ -219,3 +219,11 @@ def test_optional_pod_defaults_are_emitted_only_when_configured():
     assert pod_spec["terminationGracePeriodSeconds"] == 30
     assert container["imagePullPolicy"] == "IfNotPresent"
     assert container["workingDir"] == "/workspace"
+
+
+def test_image_pull_secret_names_are_validated():
+    cluster = _custom_cluster().model_dump(mode="json")
+    cluster["pod_defaults"]["image_pull_secrets"] = ["not/a-secret"]
+
+    with pytest.raises(ValidationError, match="Kubernetes Secret names"):
+        Cluster.model_validate(cluster)

@@ -228,6 +228,8 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
         pod_metadata["annotations"] = annotations
 
     pod_spec = {"volumes": volumes, "containers": [vllm_container, *containers]}
+    if cluster.pod_defaults.image_pull_secrets:
+        pod_spec["imagePullSecrets"] = cluster.pod_defaults.image_pull_secret_refs()
     if resolved.resource_claims:
         pod_spec["resourceClaims"] = copy.deepcopy(resolved.resource_claims)
         vllm_container["resources"]["claims"] = [

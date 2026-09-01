@@ -383,6 +383,15 @@ def render_idle_shutdown(
                     "metadata": {"labels": labels, "annotations": pod_annotations},
                     "spec": {
                         "serviceAccountName": name,
+                        **(
+                            {
+                                "imagePullSecrets": (
+                                    cluster.pod_defaults.image_pull_secret_refs()
+                                )
+                            }
+                            if cluster.pod_defaults.image_pull_secrets
+                            else {}
+                        ),
                         "containers": [
                             {
                                 "name": "idle-shutdown",
