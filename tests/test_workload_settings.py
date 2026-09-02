@@ -32,6 +32,7 @@ def test_workload_settings_project_only_portable_cluster_policy():
     cluster.pod_defaults.tolerations = [{"key": "gpu", "operator": "Exists"}]
     cluster.pod_defaults.image_pull_secrets = ["example-registry-credentials"]
     cluster.accelerators.profiles["gb200"].node_selector["gpu.product"] = "GB200"
+    cluster.fabric.imex_resource_claim_template = "compute-domain-template"
 
     settings = workload_settings(cluster)
 
@@ -41,6 +42,12 @@ def test_workload_settings_project_only_portable_cluster_policy():
     assert settings.pod.annotations == {"example.com/pool": "gpu"}
     assert settings.pod.tolerations == [{"key": "gpu", "operator": "Exists"}]
     assert settings.pod.image_pull_secrets == ["example-registry-credentials"]
+    assert [claim.model_dump() for claim in settings.accelerator_resource_claims] == [
+        {
+            "name": "compute-domain-channel",
+            "template_name": "compute-domain-template",
+        }
+    ]
     assert "storage" not in settings.model_dump()
     assert "fabric" not in settings.model_dump()
 
@@ -131,6 +138,71 @@ def test_job_renderer_owns_queue_placement_and_optional_headless_service():
         "requests": {"nvidia.com/gpu": "2"},
         "limits": {"nvidia.com/gpu": "2"},
     }
+
+
+def test_job_renderer_supports_indexed_controller_policy():
+    workload = Workload(
+        name="distributed-benchmark",
+        backend=WorkloadBackend.JOB,
+        pod_template=PodTemplate(
+            spec={"containers": [{"name": "worker", "image": "worker:test"}]}
+        ),
+        job=JobPolicy(
+            completion_mode="Indexed",
+            completions=2,
+            parallelism=2,
+            pod_failure_policy={"rules": [{"action": "FailJob"}]},
+        ),
+    )
+
+    (job,) = render_workload(workload)
+
+    assert job["spec"]["completionMode"] == "Indexed"
+    assert job["spec"]["completions"] == 2
+    assert job["spec"]["parallelism"] == 2
+    assert job["spec"]["podFailurePolicy"] == {
+        "rules": [{"action": "FailJob"}]
+    }
+
+
+def test_lws_renderer_applies_cluster_policy_to_explicit_leader_and_worker():
+    cluster = load_cluster(ROOT / "clusters" / "example-gb200.yaml")
+    cluster.fabric.imex_resource_claim_template = "compute-domain-template"
+    pod = PodTemplate(
+        metadata=WorkloadMetadata(labels={"app": "benchmark"}),
+        spec={"containers": [{"name": "worker", "image": "worker:test"}]},
+    )
+    workload = Workload(
+        name="distributed-benchmark",
+        backend=WorkloadBackend.LEADER_WORKER_SET,
+        metadata=WorkloadMetadata(labels={"app": "benchmark"}),
+        pod_template=pod,
+        accelerator_count=2,
+        accelerator_container="worker",
+        leader_worker_set=LeaderWorkerSetPolicy(
+            replicas=1,
+            size=2,
+            startup_policy="LeaderCreated",
+            restart_policy="None",
+            network_config={"subdomainPolicy": "Shared"},
+            leader_template=pod,
+        ),
+    )
+
+    (lws,) = render_workload(workload, settings=workload_settings(cluster))
+
+    assert lws["spec"]["startupPolicy"] == "LeaderCreated"
+    assert lws["spec"]["networkConfig"] == {"subdomainPolicy": "Shared"}
+    group = lws["spec"]["leaderWorkerTemplate"]
+    assert group["restartPolicy"] == "None"
+    assert group["leaderTemplate"] == group["workerTemplate"]
+    for template in (group["leaderTemplate"], group["workerTemplate"]):
+        assert template["spec"]["resourceClaims"] == [
+            {
+                "name": "compute-domain-channel",
+                "resourceClaimTemplateName": "compute-domain-template",
+            }
+        ]
 
 
 @pytest.mark.parametrize(

@@ -19,6 +19,7 @@ from .cluster import AcceleratorAllocationConfig, Cluster
 from .dra import (
     accelerator_claim_template_name,
     attach_accelerator_claim,
+    attach_resource_claim,
     render_accelerator_claim_template,
 )
 
@@ -56,6 +57,10 @@ class JobPolicy(BaseModel):
     backoff_limit: int = Field(default=0, ge=0)
     active_deadline_seconds: int | None = Field(default=None, ge=1)
     ttl_seconds_after_finished: int | None = Field(default=None, ge=0)
+    completion_mode: Literal["NonIndexed", "Indexed"] | None = None
+    completions: int | None = Field(default=None, ge=1)
+    parallelism: int | None = Field(default=None, ge=1)
+    pod_failure_policy: dict[str, Any] = Field(default_factory=dict)
 
 
 class DeploymentPolicy(BaseModel):
@@ -70,6 +75,10 @@ class LeaderWorkerSetPolicy(BaseModel):
 
     replicas: int = Field(default=1, ge=0)
     size: int = Field(default=1, ge=1)
+    startup_policy: Literal["LeaderCreated", "LeaderReady"] | None = None
+    restart_policy: Literal["None", "RecreateGroupOnPodRestart"] | None = None
+    network_config: dict[str, Any] = Field(default_factory=dict)
+    leader_template: PodTemplate | None = None
     rollout_strategy: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -166,6 +175,15 @@ class WorkloadPodDefaults(BaseModel):
     image_pull_policy: Literal["Always", "IfNotPresent", "Never"] | None = None
 
 
+class WorkloadResourceClaim(BaseModel):
+    """Cluster-owned ResourceClaimTemplate attached to accelerator containers."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str
+    template_name: str
+
+
 class WorkloadSettings(BaseModel):
     """Cluster-owned settings that are safe to reuse for arbitrary GPU Jobs."""
 
@@ -175,6 +193,7 @@ class WorkloadSettings(BaseModel):
     accelerators: dict[str, WorkloadAccelerator]
     local_queue: str | None = None
     pod: WorkloadPodDefaults = Field(default_factory=WorkloadPodDefaults)
+    accelerator_resource_claims: tuple[WorkloadResourceClaim, ...] = ()
 
     def accelerator(self, name: str | None = None) -> WorkloadAccelerator:
         selected = name if name and name != "any" else self.default_accelerator
@@ -210,6 +229,16 @@ def workload_settings(cluster: Cluster) -> WorkloadSettings:
             image_pull_secrets=list(pod.image_pull_secrets),
             image_pull_policy=pod.image_pull_policy,
         ),
+        accelerator_resource_claims=(
+            (
+                WorkloadResourceClaim(
+                    name="compute-domain-channel",
+                    template_name=cluster.fabric.imex_resource_claim_template,
+                ),
+            )
+            if cluster.fabric.imex_resource_claim_template
+            else ()
+        ),
     )
 
 
@@ -223,10 +252,25 @@ def render_workload(
 
     pod_template = workload.pod_template.model_dump(mode="python")
     accelerator_claim_template = None
+    leader_template = (
+        workload.leader_worker_set.leader_template.model_dump(mode="python")
+        if workload.leader_worker_set
+        and workload.leader_worker_set.leader_template is not None
+        else None
+    )
     if settings is not None:
         accelerator_claim_template = _apply_settings(
             pod_template, settings, accelerator, workload
         )
+        if leader_template is not None:
+            leader_claim_template = _apply_settings(
+                leader_template, settings, accelerator, workload
+            )
+            if leader_claim_template != accelerator_claim_template:
+                raise ValueError(
+                    "LeaderWorkerSet leader and worker templates resolved to "
+                    "different accelerator claims"
+                )
     if not pod_template["metadata"].get("annotations"):
         pod_template["metadata"].pop("annotations", None)
 
@@ -267,7 +311,12 @@ def render_workload(
         )
     elif workload.backend == WorkloadBackend.LEADER_WORKER_SET:
         objects.append(
-            _render_leader_worker_set(workload, workload_labels, pod_template)
+            _render_leader_worker_set(
+                workload,
+                workload_labels,
+                pod_template,
+                leader_template,
+            )
         )
     else:
         raise NotImplementedError(
@@ -371,6 +420,13 @@ def _apply_settings(
                 "accelerator_container is required when a GPU workload has "
                 "multiple containers"
             )
+        for claim in settings.accelerator_resource_claims:
+            attach_resource_claim(
+                pod_spec,
+                container,
+                name=claim.name,
+                template_name=claim.template_name,
+            )
         if selected.resource_name is not None:
             resources = container.setdefault("resources", {})
             value = str(workload.accelerator_count)
@@ -421,6 +477,14 @@ def _render_job(
         spec["activeDeadlineSeconds"] = policy.active_deadline_seconds
     if policy.ttl_seconds_after_finished is not None:
         spec["ttlSecondsAfterFinished"] = policy.ttl_seconds_after_finished
+    if policy.completion_mode is not None:
+        spec["completionMode"] = policy.completion_mode
+    if policy.completions is not None:
+        spec["completions"] = policy.completions
+    if policy.parallelism is not None:
+        spec["parallelism"] = policy.parallelism
+    if policy.pod_failure_policy:
+        spec["podFailurePolicy"] = copy.deepcopy(policy.pod_failure_policy)
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -456,6 +520,7 @@ def _render_leader_worker_set(
     workload: Workload,
     labels: dict[str, str],
     pod_template: dict[str, Any],
+    leader_template: dict[str, Any] | None,
 ) -> dict[str, Any]:
     policy = workload.leader_worker_set
     assert policy is not None
@@ -466,6 +531,14 @@ def _render_leader_worker_set(
             "workerTemplate": pod_template,
         },
     }
+    if leader_template is not None:
+        spec["leaderWorkerTemplate"]["leaderTemplate"] = leader_template
+    if policy.restart_policy is not None:
+        spec["leaderWorkerTemplate"]["restartPolicy"] = policy.restart_policy
+    if policy.startup_policy is not None:
+        spec["startupPolicy"] = policy.startup_policy
+    if policy.network_config:
+        spec["networkConfig"] = copy.deepcopy(policy.network_config)
     if policy.rollout_strategy:
         spec["rolloutStrategy"] = copy.deepcopy(policy.rollout_strategy)
     return {
