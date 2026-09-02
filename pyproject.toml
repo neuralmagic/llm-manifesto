@@ -1,7 +1,7 @@
 # Python package metadata and tool configuration for the manifesto renderer.
 [project]
 name = "llm-manifesto"
-version = "0.3.0"
+version = "0.4.0"
 description = "Declarative Kubernetes renderer for llm-d and vLLM deployments"
 requires-python = ">=3.11"
 license = "Apache-2.0"

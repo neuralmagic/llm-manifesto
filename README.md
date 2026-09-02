@@ -569,6 +569,12 @@ lowers Deployment and LeaderWorkerSet backends, including explicit LWS leader
 templates; Grove is reserved as an extension point until its rendering
 contract is implemented.
 
+An explicit LWS leader template is intentionally same-shaped: Manifesto applies
+the workload's accelerator count, accelerator container, and cluster-owned
+claims to both leader and worker templates. It also removes Kueue queue labels
+from both Pod templates and keeps queue selection on the LeaderWorkerSet, as
+required by Kueue's LWS integration.
+
 ### Kueue admission
 
 GPU roles can be admitted through a Kueue LocalQueue selected in the cluster
