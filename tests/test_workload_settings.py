@@ -17,7 +17,9 @@ from manifesto.workload import (
     Workload,
     WorkloadBackend,
     WorkloadMetadata,
+    WorkloadResourceClaim,
     WorkloadService,
+    WorkloadSettings,
     render_workload,
     workload_settings,
 )
@@ -32,6 +34,7 @@ def test_workload_settings_project_only_portable_cluster_policy():
     cluster.pod_defaults.tolerations = [{"key": "gpu", "operator": "Exists"}]
     cluster.pod_defaults.image_pull_secrets = ["example-registry-credentials"]
     cluster.accelerators.profiles["gb200"].node_selector["gpu.product"] = "GB200"
+    cluster.fabric.imex_resource_claim_template = "compute-domain-template"
 
     settings = workload_settings(cluster)
 
@@ -41,6 +44,12 @@ def test_workload_settings_project_only_portable_cluster_policy():
     assert settings.pod.annotations == {"example.com/pool": "gpu"}
     assert settings.pod.tolerations == [{"key": "gpu", "operator": "Exists"}]
     assert settings.pod.image_pull_secrets == ["example-registry-credentials"]
+    assert [claim.model_dump() for claim in settings.accelerator_resource_claims] == [
+        {
+            "name": "compute-domain-channel",
+            "template_name": "compute-domain-template",
+        }
+    ]
     assert "storage" not in settings.model_dump()
     assert "fabric" not in settings.model_dump()
 
@@ -131,6 +140,168 @@ def test_job_renderer_owns_queue_placement_and_optional_headless_service():
         "requests": {"nvidia.com/gpu": "2"},
         "limits": {"nvidia.com/gpu": "2"},
     }
+
+
+def test_job_renderer_supports_indexed_controller_policy():
+    workload = Workload(
+        name="distributed-benchmark",
+        backend=WorkloadBackend.JOB,
+        pod_template=PodTemplate(
+            spec={
+                "restartPolicy": "Never",
+                "containers": [{"name": "worker", "image": "worker:test"}],
+            }
+        ),
+        job=JobPolicy(
+            completion_mode="Indexed",
+            completions=2,
+            parallelism=2,
+            pod_failure_policy={
+                "rules": [
+                    {
+                        "action": "FailJob",
+                        "onExitCodes": {
+                            "containerName": "worker",
+                            "operator": "NotIn",
+                            "values": [0],
+                        },
+                    }
+                ]
+            },
+        ),
+    )
+
+    (job,) = render_workload(workload)
+
+    assert job["spec"]["completionMode"] == "Indexed"
+    assert job["spec"]["completions"] == 2
+    assert job["spec"]["parallelism"] == 2
+    assert job["spec"]["podFailurePolicy"] == {
+        "rules": [
+            {
+                "action": "FailJob",
+                "onExitCodes": {
+                    "containerName": "worker",
+                    "operator": "NotIn",
+                    "values": [0],
+                },
+            }
+        ]
+    }
+
+
+def test_job_policy_rejects_invalid_indexed_and_failure_policy_combinations():
+    with pytest.raises(ValidationError, match="Indexed Jobs require completions"):
+        JobPolicy(completion_mode="Indexed")
+    with pytest.raises(ValidationError, match="at least one rule"):
+        JobPolicy(pod_failure_policy={"rules": []})
+    with pytest.raises(ValidationError, match="exactly one matcher"):
+        JobPolicy(pod_failure_policy={"rules": [{"action": "FailJob"}]})
+    with pytest.raises(ValidationError, match="supported action"):
+        JobPolicy(
+            pod_failure_policy={
+                "rules": [{"action": "Bogus", "onExitCodes": {"values": [1]}}]
+            }
+        )
+    with pytest.raises(ValidationError, match="matcher must be non-empty"):
+        JobPolicy(
+            pod_failure_policy={
+                "rules": [{"action": "FailJob", "onExitCodes": None}]
+            }
+        )
+    with pytest.raises(ValidationError, match="restartPolicy: Never"):
+        Workload(
+            name="invalid-failure-policy",
+            backend=WorkloadBackend.JOB,
+            pod_template=PodTemplate(
+                spec={"containers": [{"name": "worker", "image": "worker:test"}]}
+            ),
+            job=JobPolicy(
+                pod_failure_policy={
+                    "rules": [
+                        {
+                            "action": "FailJob",
+                            "onPodConditions": [{"type": "Ready", "status": "False"}],
+                        }
+                    ]
+                }
+            ),
+        )
+
+
+def test_lws_renderer_applies_cluster_policy_to_explicit_leader_and_worker():
+    cluster = load_cluster(ROOT / "clusters" / "example-gb200.yaml")
+    cluster.fabric.imex_resource_claim_template = "compute-domain-template"
+    pod = PodTemplate(
+        metadata=WorkloadMetadata(
+            labels={
+                "app": "benchmark",
+                "kueue.x-k8s.io/queue-name": "must-be-removed",
+                "kueue.x-k8s.io/priority-class": "must-also-be-removed",
+            }
+        ),
+        spec={"containers": [{"name": "worker", "image": "worker:test"}]},
+    )
+    workload = Workload(
+        name="distributed-benchmark",
+        backend=WorkloadBackend.LEADER_WORKER_SET,
+        metadata=WorkloadMetadata(labels={"app": "benchmark"}),
+        pod_template=pod,
+        accelerator_count=2,
+        accelerator_container="worker",
+        leader_worker_set=LeaderWorkerSetPolicy(
+            replicas=1,
+            size=2,
+            startup_policy="LeaderCreated",
+            restart_policy="None",
+            network_config={"subdomainPolicy": "Shared"},
+            leader_template=pod,
+        ),
+    )
+
+    (lws,) = render_workload(workload, settings=workload_settings(cluster))
+
+    assert lws["spec"]["startupPolicy"] == "LeaderCreated"
+    assert lws["spec"]["networkConfig"] == {"subdomainPolicy": "Shared"}
+    group = lws["spec"]["leaderWorkerTemplate"]
+    assert group["restartPolicy"] == "None"
+    assert group["leaderTemplate"] == group["workerTemplate"]
+    for template in (group["leaderTemplate"], group["workerTemplate"]):
+        assert "kueue.x-k8s.io/queue-name" not in template["metadata"]["labels"]
+        assert (
+            "kueue.x-k8s.io/priority-class"
+            not in template["metadata"]["labels"]
+        )
+        assert template["spec"]["resourceClaims"] == [
+            {
+                "name": "compute-domain-channel",
+                "resourceClaimTemplateName": "compute-domain-template",
+            }
+        ]
+
+
+def test_portable_resource_claims_validate_names_and_duplicates():
+    with pytest.raises(ValidationError, match="DNS-1123 label"):
+        WorkloadResourceClaim(name="Not Valid", template_name="valid-template")
+    with pytest.raises(ValidationError, match="DNS-1123 subdomain"):
+        WorkloadResourceClaim(name="valid", template_name="Not Valid")
+    with pytest.raises(ValidationError, match="DNS-1123 subdomain"):
+        WorkloadResourceClaim(name="valid", template_name="a..b")
+    with pytest.raises(ValidationError, match="DNS-1123 subdomain"):
+        WorkloadResourceClaim(
+            name="valid", template_name=f"{'a' * 64}.example"
+        )
+    claim = WorkloadResourceClaim(name="accelerator", template_name="template")
+    with pytest.raises(ValidationError, match="must be unique"):
+        WorkloadSettings(
+            default_accelerator="b200",
+            accelerators={
+                "b200": workload_settings(
+                    load_cluster(ROOT / "clusters" / "example-gb200.yaml")
+                ).accelerator()
+            },
+            accelerator_resource_claims=[claim, claim],
+        )
 
 
 @pytest.mark.parametrize(

@@ -144,6 +144,7 @@ def test_dra_accelerator_claim_coexists_with_imex_claim():
 
 def test_reusable_workload_renderer_emits_dra_template_and_job():
     cluster = _dra_cluster()
+    cluster.fabric.imex_resource_claim_template = "compute-domain-template"
     workload = Workload(
         name="benchmark",
         backend=WorkloadBackend.JOB,
@@ -170,8 +171,21 @@ def test_reusable_workload_renderer_emits_dra_template_and_job():
         "count"
     ] == 2
     assert job["spec"]["template"]["spec"]["containers"][0]["resources"] == {
-        "claims": [{"name": DRA_CLAIM_NAME}]
+        "claims": [
+            {"name": "compute-domain-channel"},
+            {"name": DRA_CLAIM_NAME},
+        ]
     }
+    assert job["spec"]["template"]["spec"]["resourceClaims"] == [
+        {
+            "name": "compute-domain-channel",
+            "resourceClaimTemplateName": "compute-domain-template",
+        },
+        {
+            "name": DRA_CLAIM_NAME,
+            "resourceClaimTemplateName": template["metadata"]["name"],
+        },
+    ]
 
 
 def test_immutable_template_name_changes_with_count():

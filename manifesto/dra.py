@@ -92,23 +92,42 @@ def attach_accelerator_claim(
     *,
     template_name: str,
 ) -> None:
+    attach_resource_claim(
+        pod_spec,
+        container,
+        name=DRA_CLAIM_NAME,
+        template_name=template_name,
+    )
+
+
+def attach_resource_claim(
+    pod_spec: dict[str, Any],
+    container: dict[str, Any],
+    *,
+    name: str,
+    template_name: str,
+) -> None:
+    """Attach a named ResourceClaimTemplate to one workload container."""
+
     pod_claims = pod_spec.setdefault("resourceClaims", [])
-    _require_available_claim_name(pod_claims, "pod resourceClaims")
+    _require_available_claim_name(pod_claims, name, "pod resourceClaims")
     pod_claims.append(
         {
-            "name": DRA_CLAIM_NAME,
+            "name": name,
             "resourceClaimTemplateName": template_name,
         }
     )
 
     container_claims = container.setdefault("resources", {}).setdefault("claims", [])
-    _require_available_claim_name(container_claims, "container resources.claims")
-    container_claims.append({"name": DRA_CLAIM_NAME})
+    _require_available_claim_name(container_claims, name, "container resources.claims")
+    container_claims.append({"name": name})
 
 
-def _require_available_claim_name(claims: list[dict[str, Any]], location: str) -> None:
-    if any(claim.get("name") == DRA_CLAIM_NAME for claim in claims):
+def _require_available_claim_name(
+    claims: list[dict[str, Any]], name: str, location: str
+) -> None:
+    if any(claim.get("name") == name for claim in claims):
         raise ValueError(
-            f"generated accelerator claim name {DRA_CLAIM_NAME!r} conflicts with "
-            f"an existing entry in {location}"
+            f"generated resource claim name {name!r} conflicts with an existing "
+            f"entry in {location}"
         )

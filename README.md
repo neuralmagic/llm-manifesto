@@ -545,10 +545,12 @@ accelerator = settings.accelerator("gb200")
 ```
 
 The portable projection contains accelerator resource or DeviceClass names and
-node selectors, the default Kueue LocalQueue, and pod placement defaults such as
-affinity, tolerations, DNS, annotations, and image pull policy. Storage,
-fabric configuration, and launch settings remain part of Manifesto's
-serving-specific cluster model.
+node selectors, the default Kueue LocalQueue, accelerator-attached platform
+claims such as an NVIDIA compute-domain channel, and pod placement defaults
+such as affinity, tolerations, DNS, annotations, and image pull policy. The
+projection carries only each claim's portable name and template reference;
+storage, the rest of the fabric configuration, and launch settings remain part
+of Manifesto's serving-specific cluster model.
 
 Manifesto also owns a controller-neutral workload IR and its Kubernetes object
 lowering. This lets tools describe a pod template and lifecycle policy while
@@ -560,11 +562,18 @@ manifesto render workload examples/non-indexed-job.yaml \
   --accelerator gb200
 ```
 
-The `job` backend emits an ordinary, non-indexed `batch/v1` Job. It never adds
-`completionMode`, `completions`, or `parallelism`. A workload may optionally
-declare a normal or headless Service. The same IR currently lowers Deployment
-and LeaderWorkerSet backends; Grove is reserved as an extension point until its
-rendering contract is implemented.
+The `job` backend emits an ordinary, non-indexed `batch/v1` Job by default and
+can explicitly describe Indexed Job completion policy for distributed work. A
+workload may optionally declare a normal or headless Service. The same IR
+lowers Deployment and LeaderWorkerSet backends, including explicit LWS leader
+templates; Grove is reserved as an extension point until its rendering
+contract is implemented.
+
+An explicit LWS leader template is intentionally same-shaped: Manifesto applies
+the workload's accelerator count, accelerator container, and cluster-owned
+claims to both leader and worker templates. It also removes Kueue queue labels
+from both Pod templates and keeps queue selection on the LeaderWorkerSet, as
+required by Kueue's LWS integration.
 
 ### Kueue admission
 
