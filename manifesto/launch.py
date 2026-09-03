@@ -118,6 +118,7 @@ def build_launch_script(
             "trap on_exit EXIT",
             "",
         ]
+    hooks = [*spec.runtime.pre_launch, *role.pre_launch]
     if vllm_env:
         lines += [
             'if [ ! -d "${MANIFESTO_VLLM_ENV}" ]; then',
@@ -132,6 +133,11 @@ def build_launch_script(
             'source "${MANIFESTO_VLLM_ENV}/.venv/bin/activate"',
             "",
         ]
+        if hooks:
+            lines += [
+                'MANIFESTO_VLLM_PYTHON="${MANIFESTO_VLLM_ENV}/.venv/bin/python"',
+                "",
+            ]
     else:
         lines += [
             "if [ -f /opt/vllm/bin/activate ]; then",
@@ -139,9 +145,30 @@ def build_launch_script(
             "fi",
             "",
         ]
-    hooks = [*spec.runtime.pre_launch, *role.pre_launch]
+        if hooks:
+            lines += [
+                'MANIFESTO_VLLM_EXECUTABLE="$(command -v vllm)"',
+                'MANIFESTO_VLLM_PYTHON="$(command -v python3 || true)"',
+                'if IFS= read -r MANIFESTO_VLLM_SHEBANG < "$MANIFESTO_VLLM_EXECUTABLE"; then',
+                '  if [[ "$MANIFESTO_VLLM_SHEBANG" =~ ^\\#\\!/usr/bin/env[[:space:]]+(python([0-9]+([.][0-9]+)*)?)([[:space:]].*)?$ ]]; then',
+                '    MANIFESTO_VLLM_PYTHON="$(command -v "${BASH_REMATCH[1]}" || true)"',
+                '  elif [[ "$MANIFESTO_VLLM_SHEBANG" =~ ^\\#\\!([^[:space:]]*/python([0-9]+([.][0-9]+)*)?)([[:space:]].*)?$ ]]; then',
+                '    MANIFESTO_VLLM_PYTHON="${BASH_REMATCH[1]}"',
+                "  fi",
+                "fi",
+                "",
+            ]
     if hooks:
         lines += [
+            'if [ ! -x "$MANIFESTO_VLLM_PYTHON" ]; then',
+            '  echo "Error: unable to resolve the Python interpreter for vLLM" >&2',
+            "  exit 1",
+            "fi",
+            "export MANIFESTO_VLLM_PYTHON",
+            "if ! command -v python >/dev/null 2>&1; then",
+            '  python() { "$MANIFESTO_VLLM_PYTHON" "$@"; }',
+            "fi",
+            "",
             "echo '=== Running pre-launch hooks ==='",
             *hooks,
             "",

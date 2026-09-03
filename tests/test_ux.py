@@ -1,5 +1,7 @@
 """UX-level tests for compact YAML syntax, equations, and generated manifests."""
 
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -379,3 +381,108 @@ def test_pre_launch_hooks_run_before_rank_launch_setup():
     assert script.index("source /opt/vllm/bin/activate") < script.index("echo runtime-hook")
     assert script.index("echo runtime-hook") < script.index("echo role-hook")
     assert script.index("echo role-hook") < script.index("DP_SIZE_LOCAL=4")
+
+
+def _system_vllm_python_setup() -> str:
+    spec = load_spec(DEEPSEEK, CLUSTER)
+    spec.runtime.pre_launch.append('python -c "import vllm"')
+
+    objects = render(spec, user="tester", cluster=CLUSTER)
+    lws = next(
+        obj
+        for obj in objects
+        if obj["kind"] == "LeaderWorkerSet"
+        and obj["metadata"]["name"].endswith("decode")
+    )
+    script = lws["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"][
+        "containers"
+    ][0]["args"][0]
+    start = script.index('MANIFESTO_VLLM_EXECUTABLE="$(command -v vllm)"')
+    end = script.index("echo '=== Running pre-launch hooks ==='")
+    return f"set -euo pipefail\n{script[start:end]}"
+
+
+def _executable(path: Path, contents: bytes) -> None:
+    path.write_bytes(contents)
+    path.chmod(0o755)
+
+
+def test_system_vllm_python_is_available_to_pre_launch_hooks():
+    script = _system_vllm_python_setup()
+
+    assert 'MANIFESTO_VLLM_EXECUTABLE="$(command -v vllm)"' in script
+    assert 'MANIFESTO_VLLM_PYTHON="$(command -v python3 || true)"' in script
+    assert "/usr/bin/env[[:space:]]+(python" in script
+    assert "[^[:space:]]*/python" in script
+    assert 'python() { "$MANIFESTO_VLLM_PYTHON" "$@"; }' in script
+
+
+@pytest.mark.parametrize("launcher", [b"#!/bin/sh\n", b"\x7fELF"])
+def test_custom_vllm_launchers_use_python3_fallback(tmp_path, launcher):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _executable(bin_dir / "vllm", launcher)
+    _executable(bin_dir / "python3", b"#!/bin/sh\n")
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            f'{_system_vllm_python_setup()}\nprintf "%s" "$MANIFESTO_VLLM_PYTHON"',
+        ],
+        env=os.environ | {"PATH": str(bin_dir)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(bin_dir / "python3")
+
+
+@pytest.mark.parametrize("env_shebang", [False, True])
+def test_python_vllm_shebang_selects_its_interpreter(tmp_path, env_shebang):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fallback = bin_dir / "python3"
+    interpreter = bin_dir / "python3.12"
+    _executable(fallback, b"#!/bin/sh\n")
+    _executable(interpreter, b"#!/bin/sh\n")
+    shebang = (
+        b"#!/usr/bin/env python3.12\n"
+        if env_shebang
+        else f"#!{interpreter}\n".encode()
+    )
+    _executable(bin_dir / "vllm", shebang)
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            f'{_system_vllm_python_setup()}\nprintf "%s" "$MANIFESTO_VLLM_PYTHON"',
+        ],
+        env=os.environ | {"PATH": str(bin_dir)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(interpreter)
+
+
+def test_launch_without_hooks_does_not_require_python_resolution():
+    spec = load_spec(DEEPSEEK, CLUSTER)
+    objects = render(spec, user="tester", cluster=CLUSTER)
+    lws = next(
+        obj
+        for obj in objects
+        if obj["kind"] == "LeaderWorkerSet"
+        and obj["metadata"]["name"].endswith("decode")
+    )
+    script = lws["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"][
+        "containers"
+    ][0]["args"][0]
+
+    assert "MANIFESTO_VLLM_EXECUTABLE" not in script
+    assert "MANIFESTO_VLLM_PYTHON" not in script
