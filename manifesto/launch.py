@@ -130,6 +130,7 @@ def build_launch_script(
             "fi",
             'echo "Using vllm-envs worktree at ${MANIFESTO_VLLM_ENV}"',
             'source "${MANIFESTO_VLLM_ENV}/.venv/bin/activate"',
+            'MANIFESTO_VLLM_PYTHON="${MANIFESTO_VLLM_ENV}/.venv/bin/python"',
             "",
         ]
     else:
@@ -137,8 +138,30 @@ def build_launch_script(
             "if [ -f /opt/vllm/bin/activate ]; then",
             "  source /opt/vllm/bin/activate",
             "fi",
+            'MANIFESTO_VLLM_EXECUTABLE="$(command -v vllm)"',
+            'IFS= read -r MANIFESTO_VLLM_SHEBANG < "$MANIFESTO_VLLM_EXECUTABLE"',
+            'MANIFESTO_VLLM_PYTHON=""',
+            'case "$MANIFESTO_VLLM_SHEBANG" in',
+            "  '#!/usr/bin/env '*)",
+            '    MANIFESTO_VLLM_PYTHON="$(command -v "${MANIFESTO_VLLM_SHEBANG#\\#!/usr/bin/env }")"',
+            "    ;;",
+            "  '#!'*)",
+            '    MANIFESTO_VLLM_PYTHON="${MANIFESTO_VLLM_SHEBANG#\\#!}"',
+            "    ;;",
+            "esac",
             "",
         ]
+    lines += [
+        'if [ ! -x "$MANIFESTO_VLLM_PYTHON" ]; then',
+        '  echo "Error: unable to resolve the Python interpreter for vLLM" >&2',
+        "  exit 1",
+        "fi",
+        "export MANIFESTO_VLLM_PYTHON",
+        "if ! command -v python >/dev/null 2>&1; then",
+        '  python() { "$MANIFESTO_VLLM_PYTHON" "$@"; }',
+        "fi",
+        "",
+    ]
     hooks = [*spec.runtime.pre_launch, *role.pre_launch]
     if hooks:
         lines += [

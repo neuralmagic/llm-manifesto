@@ -324,3 +324,27 @@ def test_pre_launch_hooks_run_before_rank_launch_setup():
     assert script.index("source /opt/vllm/bin/activate") < script.index("echo runtime-hook")
     assert script.index("echo runtime-hook") < script.index("echo role-hook")
     assert script.index("echo role-hook") < script.index("DP_SIZE_LOCAL=4")
+
+
+def test_system_vllm_python_is_available_to_pre_launch_hooks():
+    spec = load_spec(DEEPSEEK, CLUSTER)
+    spec.runtime.pre_launch.append('python -c "import vllm"')
+
+    objects = render(spec, user="tester", cluster=CLUSTER)
+    lws = next(
+        obj
+        for obj in objects
+        if obj["kind"] == "LeaderWorkerSet"
+        and obj["metadata"]["name"].endswith("decode")
+    )
+    script = lws["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"][
+        "containers"
+    ][0]["args"][0]
+
+    assert 'MANIFESTO_VLLM_EXECUTABLE="$(command -v vllm)"' in script
+    assert "'#!/usr/bin/env '*)" in script
+    assert 'MANIFESTO_VLLM_PYTHON="${MANIFESTO_VLLM_SHEBANG#\\#!}"' in script
+    assert 'python() { "$MANIFESTO_VLLM_PYTHON" "$@"; }' in script
+    assert script.index("export MANIFESTO_VLLM_PYTHON") < script.index(
+        'python -c "import vllm"'
+    )
