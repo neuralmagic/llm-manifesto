@@ -207,7 +207,7 @@ class RoleSpec(BaseModel):
         raw_pp_args = [
             arg
             for arg in self.vllm_raw_args
-            if re.match(r"^(?:--pipeline-parallel-size|-pp)(?:[= ]|$)", arg)
+            if re.match(r"^(?:--pipeline[-_]parallel[-_]size|-pp)(?:[= ]|$)", arg)
         ]
         if configured_pp_args or computed_pp_args or raw_pp_args:
             raise ValueError(

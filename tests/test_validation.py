@@ -154,6 +154,7 @@ def test_cross_node_pipeline_parallelism_requires_complete_groups():
         {"name": "decode", "vllm": {"pipeline_parallel_size": 2}},
         {"name": "decode", "computed": {"vllm": {"pipeline-parallel-size": 2}}},
         {"name": "decode", "vllm_raw_args": ["--pipeline-parallel-size=2"]},
+        {"name": "decode", "vllm_raw_args": ["--pipeline_parallel_size=2"]},
         {"name": "decode", "vllm_raw_args": ["-pp 2"]},
     ],
 )

@@ -242,16 +242,21 @@ def render_idle_shutdown(
         )
         resolved = resolve_role(spec, instance, cluster, role)
         layout = parallel_layout(role)
+        serving_worker_indices = (
+            layout.serving_worker_indices
+            if layout.cross_node_model_parallel and resolved.features.external_dp
+            else (0,)
+        )
         targets[instance.labels(role=role.name)["llm-d.ai/role"]] = {
             "ports": list(resolved.ports.backend),
             "worker_indices": (
-                [str(index) for index in layout.serving_worker_indices]
+                [str(index) for index in serving_worker_indices]
                 if layout.cross_node_model_parallel
                 else None
             ),
         }
         serving_pods_per_replica = (
-            len(layout.serving_worker_indices)
+            len(serving_worker_indices)
             if layout.cross_node_model_parallel
             else role.lws.size
         )

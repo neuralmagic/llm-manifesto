@@ -376,6 +376,39 @@ def test_idle_shutdown_only_scrapes_cross_node_tp_api_servers():
     assert env["EXPECTED_TARGETS"]["value"] == "1"
 
 
+@pytest.mark.parametrize(
+    ("routing_kind", "dp_mode", "worker_indices", "expected_targets"),
+    [
+        ("disabled", "internal", ["0"], "1"),
+        ("load_aware", "external", ["0", "2"], "2"),
+    ],
+)
+def test_idle_shutdown_only_scrapes_cross_node_dp_api_servers(
+    routing_kind, dp_mode, worker_indices, expected_targets
+):
+    spec = load_spec(ROOT / "models" / "qwen" / "aggregated.yaml", CLUSTER)
+    spec.routing.kind = routing_kind
+    role = spec.role("decode")
+    role.dp_load_balancing = dp_mode
+    role.lws.size = 4
+    role.parallelism.tp = 1
+    role.parallelism.pp = 2
+    role.parallelism.dp = 2
+    role.parallelism.gpus = 1
+    role.resources.gpus = 1
+
+    objects = render(spec, user="tester", cluster=CLUSTER)
+    controller = _find(objects, "Deployment", "idle-shutdown")
+    env = {
+        item["name"]: item
+        for item in controller["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    targets = json.loads(env["TARGETS"]["value"])
+
+    assert targets["decode"]["worker_indices"] == worker_indices
+    assert env["EXPECTED_TARGETS"]["value"] == expected_targets
+
+
 def test_cluster_schema_rejects_removed_dev_configuration(tmp_path):
     data = yaml.safe_load((ROOT / "clusters" / "example-gb200.yaml").read_text())
     data["dev"] = {"venv": "/mnt/shared/vllm-venv"}
