@@ -156,12 +156,12 @@ def build_launch_script(
             lines.append("START_RANK=$(( LWS_WORKER_INDEX * DP_SIZE_LOCAL ))")
         elif not distributed_dp:
             lines.append("START_RANK=0")
-    if layout.cross_node_tp:
+    if layout.cross_node_model_parallel:
         lines += ["HEADLESS_ARGS=()"]
         if distributed_dp and external_dp:
             lines += [
-                f"TP_NODES={layout.tp_node_count}",
-                'if (( LWS_WORKER_INDEX % TP_NODES != 0 )); then',
+                f"MODEL_PARALLEL_NODES={layout.model_parallel_node_count}",
+                'if (( LWS_WORKER_INDEX % MODEL_PARALLEL_NODES != 0 )); then',
             ]
         else:
             lines.append('if [ "$LWS_WORKER_INDEX" -gt 0 ]; then')
@@ -180,16 +180,18 @@ def build_launch_script(
         ],
         ["--tensor-parallel-size", str(layout.tp_world_size)],
     ]
+    if layout.pp_world_size > 1:
+        base_args.append(["--pipeline-parallel-size", str(layout.pp_world_size)])
     if not multi_port_external_dp:
         device_ids = (
-            ",".join(str(index) for index in range(layout.tp_local_size))
+            ",".join(str(index) for index in range(layout.model_parallel_local_size))
             if single_rank
             else "$GPUS"
         )
         base_args[3:3] = [["--device-ids", device_ids]]
     if role.parallelism.ep:
         base_args.append("--enable-expert-parallel")
-    if layout.cross_node_tp:
+    if layout.cross_node_model_parallel:
         base_args += [
             ["--nnodes", str(role.lws.size)],
             ["--node-rank", "$LWS_WORKER_INDEX"],
@@ -253,8 +255,8 @@ def build_launch_script(
     lines += [
         "",
         "for R in $(seq 0 $((DP_SIZE_LOCAL - 1))); do",
-        f"  GPU_START=$((R * {layout.tp_local_size}))",
-        f"  GPUS=$(seq -s, $GPU_START $((GPU_START + {layout.tp_local_size} - 1)))",
+        f"  GPU_START=$((R * {layout.model_parallel_local_size}))",
+        f"  GPUS=$(seq -s, $GPU_START $((GPU_START + {layout.model_parallel_local_size} - 1)))",
         "  RANK=$((START_RANK + R))",
         f"  PORTS=({' '.join(str(port) for port in ports.backend)})",
         "  PORT=${PORTS[$R]}",

@@ -128,6 +128,26 @@ def test_equations_get_explicit_dp_scopes():
     assert resolved.env["DP_WORLD"] == "8"
 
 
+def test_equations_get_pipeline_and_model_parallel_scopes():
+    spec = load_spec(ROOT / "models" / "qwen" / "aggregated.yaml", CLUSTER)
+    role = spec.role("decode")
+    role.parallelism.tp = 2
+    role.parallelism.pp = 2
+    role.parallelism.gpus = 4
+    role.resources.gpus = 4
+    role.computed["env"] = {
+        "PP_WORLD": "pp_world_size",
+        "MODEL_PARALLEL_LOCAL": "model_parallel_local_size",
+        "MODEL_PARALLEL_WORLD": "model_parallel_world_size",
+    }
+
+    resolved = resolve_role(spec, Instance("tester", spec.release), CLUSTER, role)
+
+    assert resolved.env["PP_WORLD"] == "2"
+    assert resolved.env["MODEL_PARALLEL_LOCAL"] == "4"
+    assert resolved.env["MODEL_PARALLEL_WORLD"] == "4"
+
+
 def test_prefill_tp_spans_lws_nodes():
     spec = load_spec(DEEPSEEK, CLUSTER)
     role = spec.role("prefill")
@@ -180,6 +200,30 @@ def test_omitted_resources_use_built_in_per_pod_gpu_formulas():
         assert role.gpus_per_pod == gpus
         assert role.resources.cpu == cpu
         assert role.resources.memory == memory
+
+
+def test_omitted_resources_infer_gpus_from_tp_times_pp_times_dp():
+    spec = DeploymentSpec.model_validate(
+        {
+            "release": "pipeline-parallel",
+            "topology": "aggregated",
+            "model": {"id": "model", "image": "image"},
+            "routing": {"kind": "disabled"},
+            "roles": [
+                {
+                    "name": "decode",
+                    "lws": {"size": 2},
+                    "parallelism": {"tp": 2, "pp": 2, "dp": 2},
+                }
+            ],
+        }
+    )
+
+    spec.apply_cluster_defaults(CLUSTER)
+
+    role = spec.role("decode")
+    assert role.gpus_per_pod == 4
+    assert role.resources.gpus == 4
 
 
 def test_explicit_cpu_and_memory_are_preserved_exactly():

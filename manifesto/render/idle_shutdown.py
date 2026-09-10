@@ -246,13 +246,13 @@ def render_idle_shutdown(
             "ports": list(resolved.ports.backend),
             "worker_indices": (
                 [str(index) for index in layout.serving_worker_indices]
-                if layout.cross_node_tp
+                if layout.cross_node_model_parallel
                 else None
             ),
         }
         serving_pods_per_replica = (
             len(layout.serving_worker_indices)
-            if layout.cross_node_tp
+            if layout.cross_node_model_parallel
             else role.lws.size
         )
         expected_targets += (

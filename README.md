@@ -210,7 +210,7 @@ roles:
   - name: decode
     workload_name: vllm-ep8-decode
     lws: {size: 4}
-    parallelism: {tp: 1, dp: 16, ep: true}
+    parallelism: {tp: 1, pp: 1, dp: 16, ep: true}
     computed:
       env:
         MAX_TOKENS: max_concurrency
@@ -220,15 +220,31 @@ roles:
         max_cudagraph_capture_size: max_concurrency
 ```
 
-`tp` and `dp` are global sizes. Local DP, port fanout, and per-pod launch
-arguments are derived from the workload size and GPUs per pod. GPUs per pod is
-inferred from the parallel layout and the cluster profile; set
-`parallelism.gpus` to override it. Single-node roles render as Kubernetes
+`tp`, `pp`, and `dp` are global tensor-, pipeline-, and data-parallel sizes.
+Each engine replica consumes `tp × pp` GPUs. Local model/DP groups, port fanout,
+and per-pod launch arguments are derived from the workload size and GPUs per
+pod. GPUs per pod is inferred from the parallel layout and the cluster profile;
+set `parallelism.gpus` to override it. Single-node roles render as Kubernetes
 Deployments; roles spanning multiple nodes render as LeaderWorkerSets. Set a
 role's `workload` to `deployment` or `leaderworkerset` to override that default.
 An explicit one-node LeaderWorkerSet can be useful when an admission controller
 integrates with LeaderWorkerSet rather than Deployment. Multi-node roles cannot
 select Deployment.
+
+For example, this runs one TP2 × PP2 engine across four GPUs. Increase
+`lws.size` and divide those model-parallel GPUs evenly across pods to span
+nodes; Manifesto renders the native vLLM node-rank and headless-worker flags.
+
+```yaml
+roles:
+  - name: decode
+    lws: {size: 1}
+    parallelism: {tp: 2, pp: 2, dp: false}
+```
+
+Configure PP only through `parallelism.pp`. Manifesto rejects
+`pipeline_parallel_size` in `vllm:`, computed vLLM arguments, or
+`vllm_raw_args` so GPU allocation and the vLLM worker topology cannot disagree.
 
 Unknown role keys are rejected at load time, so typos fail loudly instead of
 being silently ignored.
@@ -354,8 +370,8 @@ Manifesto default entirely.
 
 ### Feature contracts
 
-Role settings activate typed serving features before rendering. Data
-parallelism, expert parallelism, P/D, and llm-d are features. Connector and
+Role settings activate typed serving features before rendering. Data,
+pipeline, and expert parallelism, P/D, and llm-d are features. Connector and
 all-to-all implementations are reported separately as backends; workload kind
 and platform resources are derived consequences. For example:
 

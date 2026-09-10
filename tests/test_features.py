@@ -19,6 +19,7 @@ def _context(**overrides) -> FeatureContext:
     values = {
         "role_name": "decode",
         "dp_enabled": False,
+        "pipeline_parallel": False,
         "expert_parallel": False,
         "prefill_decode": False,
         "llm_d_enabled": False,
@@ -58,6 +59,12 @@ def test_direct_vllm_keeps_data_parallel_internal():
     assert plan.has(Feature.DATA_PARALLEL)
     assert not plan.has(Feature.LLM_D)
     assert plan.external_dp is False
+
+
+def test_pipeline_parallelism_is_reported_as_a_feature():
+    plan = resolve_features(_context(pipeline_parallel=True))
+
+    assert plan.has(Feature.PIPELINE_PARALLEL)
 
 
 def test_nixl_backend_contributes_only_its_required_field_env():

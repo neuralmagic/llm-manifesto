@@ -810,6 +810,56 @@ def test_no_dp_qwen_uses_single_port_and_no_dp_flags():
     assert infpool["spec"]["targetPorts"] == [{"number": 8000}]
 
 
+def test_single_node_pipeline_parallelism_uses_all_model_parallel_gpus():
+    spec = load_spec(ROOT / "models" / "qwen" / "aggregated.yaml", CLUSTER)
+    role = spec.role("decode")
+    role.parallelism.tp = 2
+    role.parallelism.pp = 2
+    role.parallelism.gpus = 4
+    role.resources.gpus = 4
+
+    objects = render(spec, user="tester", cluster=CLUSTER)
+    deployment = _find(objects, "Deployment", "decode")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    script = container["args"][0]
+
+    assert container["resources"]["requests"]["nvidia.com/gpu"] == "4"
+    assert "--device-ids 0,1,2,3" in script
+    assert "--tensor-parallel-size 2" in script
+    assert "--pipeline-parallel-size 2" in script
+    assert "--nnodes" not in script
+
+
+def test_cross_node_pipeline_parallelism_routes_only_to_group_leader():
+    spec = load_spec(ROOT / "models" / "qwen" / "aggregated.yaml", CLUSTER)
+    role = spec.role("decode")
+    role.lws.size = 2
+    role.parallelism.tp = 1
+    role.parallelism.pp = 2
+    role.parallelism.gpus = 1
+    role.resources.gpus = 1
+
+    objects = render(spec, user="tester", cluster=CLUSTER)
+    workload = _find(objects, "LeaderWorkerSet", "decode")
+    container = workload["spec"]["leaderWorkerTemplate"]["workerTemplate"][
+        "spec"
+    ]["containers"][0]
+    script = container["args"][0]
+
+    assert workload["spec"]["leaderWorkerTemplate"]["size"] == 2
+    assert "--device-ids 0" in script
+    assert "--tensor-parallel-size 1" in script
+    assert "--pipeline-parallel-size 2" in script
+    assert "--nnodes 2" in script
+    assert "--node-rank $LWS_WORKER_INDEX" in script
+    assert 'if [ "$LWS_WORKER_INDEX" -gt 0 ]; then' in script
+
+    readiness = container["readinessProbe"]["exec"]["command"][-1]
+    assert 'if [ "${LWS_WORKER_INDEX:-0}" -gt 0 ]' in readiness
+    service = _find(objects, "Service", "decode-svc")
+    assert service["spec"]["selector"]["leaderworkerset.sigs.k8s.io/worker-index"] == "0"
+
+
 def test_llmd_data_parallelism_derives_external_dp_without_pd_proxy():
     spec = load_spec(ROOT / "models" / "qwen" / "h200-aggregated.yaml", EXAMPLE_H200)
     objects = render(spec, user="tester", cluster=EXAMPLE_H200)
@@ -983,8 +1033,8 @@ def test_pd_dp2_tp8_decode_uses_two_routable_two_node_tp_groups():
     script = container["args"][0]
     assert "DP_SIZE_LOCAL=1" in script
     assert "DP_SIZE=2" in script
-    assert "TP_NODES=2" in script
-    assert "LWS_WORKER_INDEX % TP_NODES != 0" in script
+    assert "MODEL_PARALLEL_NODES=2" in script
+    assert "LWS_WORKER_INDEX % MODEL_PARALLEL_NODES != 0" in script
     assert "LWS_GROUP_INDEX" not in script
     assert "--tensor-parallel-size 8" in script
     assert "--nnodes 4" in script
