@@ -105,6 +105,7 @@ def resolve_role(spec: DeploymentSpec, instance: Instance, cluster: Cluster, rol
         FeatureContext(
             role_name=role.name,
             dp_enabled=role.parallelism.dp_enabled,
+            pipeline_parallel=role.parallelism.pp_enabled,
             expert_parallel=role.parallelism.ep,
             prefill_decode=spec.topology == TopologyKind.PD,
             llm_d_enabled=spec.routing.kind != RoutingKind.DISABLED,
@@ -156,6 +157,10 @@ def _variable_context(spec: DeploymentSpec, role: RoleSpec, layout: ParallelLayo
         "tp": layout.tp_world_size,
         "tp_world_size": layout.tp_world_size,
         "tp_local_size": layout.tp_local_size,
+        "pp": layout.pp_world_size,
+        "pp_world_size": layout.pp_world_size,
+        "model_parallel_local_size": layout.model_parallel_local_size,
+        "model_parallel_world_size": layout.model_parallel_world_size,
         "dp_enabled": role.parallelism.dp_enabled,
         "dp_local_size": layout.dp_local_size,
         "dp_world_size": layout.dp_world_size,

@@ -43,7 +43,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
     external_dp = resolved.features.external_dp
     multi_port_external_dp = external_dp and resolved.ports.rank_count > 1
     layout = parallel_layout(role)
-    cross_node_tp = layout.cross_node_tp
+    cross_node_model_parallel = layout.cross_node_model_parallel
     distributed_dp = layout.distributed_dp
     workload_name = role_workload_name(instance, role)
 
@@ -154,14 +154,14 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
             vllm_container["resources"][resource_kind]["ephemeral-storage"] = (
                 role.resources.ephemeral_storage
             )
-    if cross_node_tp:
+    if cross_node_model_parallel:
         leader_readiness = " && ".join(
             f"curl -sf http://localhost:{port}/v1/models | grep -q '\"id\"'"
             for port in readiness_ports
         )
         if distributed_dp and external_dp:
             readiness_guard = (
-                f"if (( ${{LWS_WORKER_INDEX:-0}} % {layout.tp_node_count} != 0 )); "
+                f"if (( ${{LWS_WORKER_INDEX:-0}} % {layout.model_parallel_node_count} != 0 )); "
                 "then exit 0; fi"
             )
         else:

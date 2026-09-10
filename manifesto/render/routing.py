@@ -273,7 +273,7 @@ def _filter_api_servers(
     profile_name: str,
     worker_indices: tuple[int, ...],
 ) -> None:
-    """Restrict one private scheduling config to API-serving TP-group leaders."""
+    """Restrict one private scheduling config to model-parallel group leaders."""
     plugins = config.setdefault("plugins", [])
     filter_name = f"manifesto-{profile_name}-api-server-filter"
     if not any(plugin.get("name") == filter_name for plugin in plugins):
@@ -296,7 +296,7 @@ def _filter_api_servers(
     ]
     if not profiles:
         raise ValueError(
-            f"cross-node TP routing requires a {profile_name} scheduling profile"
+            f"cross-node model parallel routing requires a {profile_name} scheduling profile"
         )
     for profile in profiles:
         profile_plugins = profile.setdefault("plugins", [])
@@ -359,7 +359,7 @@ def _profile_worker_indices(
     result: dict[str, tuple[int, ...]] = {}
     for profile_name, role_name in profile_roles.items():
         layout = parallel_layout(spec.role(role_name))
-        if layout.cross_node_tp:
+        if layout.cross_node_model_parallel:
             result[profile_name] = layout.serving_worker_indices
     return result
 

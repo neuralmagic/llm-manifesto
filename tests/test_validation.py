@@ -81,6 +81,88 @@ def test_cross_node_tp_with_dp_requires_all_tp_groups_in_one_lws_group():
         parallel_layout(role)
 
 
+def test_single_node_pipeline_parallel_layout_uses_tp_times_pp_gpus():
+    role = _role(
+        {
+            "name": "decode",
+            "parallelism": {"gpus_per_node": 4, "tp": 2, "pp": 2, "dp": False},
+        }
+    )
+
+    layout = parallel_layout(role)
+
+    assert layout.tp_world_size == 2
+    assert layout.pp_world_size == 2
+    assert role.parallelism.pp_enabled is True
+    assert layout.model_parallel_world_size == 4
+    assert layout.model_parallel_local_size == 4
+    assert layout.cross_node_model_parallel is False
+
+
+def test_cross_node_pipeline_parallel_layout_uses_one_api_server():
+    role = _role(
+        {
+            "name": "decode",
+            "lws": {"size": 2},
+            "parallelism": {"gpus_per_node": 1, "tp": 1, "pp": 2, "dp": False},
+        }
+    )
+
+    layout = parallel_layout(role)
+
+    assert layout.cross_node_tp is False
+    assert layout.cross_node_model_parallel is True
+    assert layout.model_parallel_node_count == 2
+    assert layout.serving_worker_indices == (0,)
+
+
+def test_pipeline_parallelism_combines_with_distributed_dp():
+    role = _role(
+        {
+            "name": "decode",
+            "lws": {"size": 4},
+            "parallelism": {"gpus_per_node": 2, "tp": 2, "pp": 2, "dp": 2},
+        }
+    )
+
+    layout = parallel_layout(role)
+
+    assert layout.model_parallel_world_size == 4
+    assert layout.model_parallel_local_size == 2
+    assert layout.model_parallel_node_count == 2
+    assert layout.dp_local_size == 1
+    assert layout.distributed_dp is True
+    assert layout.serving_worker_indices == (0, 2)
+
+
+def test_cross_node_pipeline_parallelism_requires_complete_groups():
+    role = _role(
+        {
+            "name": "decode",
+            "lws": {"size": 1},
+            "parallelism": {"gpus_per_node": 2, "tp": 2, "pp": 2, "dp": False},
+        }
+    )
+
+    with pytest.raises(ValueError, match="needs lws.size=2"):
+        parallel_layout(role)
+
+
+@pytest.mark.parametrize(
+    "role",
+    [
+        {"name": "decode", "vllm": {"pipeline_parallel_size": 2}},
+        {"name": "decode", "computed": {"vllm": {"pipeline-parallel-size": 2}}},
+        {"name": "decode", "vllm_raw_args": ["--pipeline-parallel-size=2"]},
+        {"name": "decode", "vllm_raw_args": ["--pipeline_parallel_size=2"]},
+        {"name": "decode", "vllm_raw_args": ["-pp 2"]},
+    ],
+)
+def test_pipeline_parallel_vllm_arg_requires_typed_parallelism(role):
+    with pytest.raises(ValidationError, match="parallelism.pp"):
+        DeploymentSpec.model_validate(_spec_with_role(role))
+
+
 def test_idle_gpus_without_dp_is_an_error():
     role = _role(
         {

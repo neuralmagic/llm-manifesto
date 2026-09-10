@@ -121,6 +121,7 @@ class ParallelismSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     tp: int = Field(1, ge=1)
+    pp: int = Field(1, ge=1)
     dp: int | bool | None = None
     ep: bool = False
     gpus: int | None = Field(None, ge=1, validation_alias=AliasChoices("gpus", "gpus_per_node"))
@@ -144,6 +145,10 @@ class ParallelismSpec(BaseModel):
     @property
     def dp_enabled(self) -> bool:
         return self.dp_size > 1
+
+    @property
+    def pp_enabled(self) -> bool:
+        return self.pp > 1
 
 
 class ResourceSpec(BaseModel):
@@ -195,7 +200,20 @@ class RoleSpec(BaseModel):
         return DEFAULT_GPUS_PER_POD
 
     @model_validator(mode="after")
-    def default_backend_port(self) -> "RoleSpec":
+    def validate_role_configuration(self) -> "RoleSpec":
+        pp_arg_names = {"pipeline_parallel_size", "pipeline-parallel-size"}
+        configured_pp_args = pp_arg_names.intersection(self.vllm_args)
+        computed_pp_args = pp_arg_names.intersection(self.computed.get("vllm", {}))
+        raw_pp_args = [
+            arg
+            for arg in self.vllm_raw_args
+            if re.match(r"^(?:--pipeline[-_]parallel[-_]size|-pp)(?:[= ]|$)", arg)
+        ]
+        if configured_pp_args or computed_pp_args or raw_pp_args:
+            raise ValueError(
+                f"{self.name}: configure pipeline parallelism with parallelism.pp, "
+                "not a pipeline-parallel-size vLLM argument"
+            )
         if self.routing_proxy and self.backend_port_base is None:
             self.backend_port_base = 8200
         return self
@@ -406,10 +424,11 @@ def _api_server_count(vllm_args: dict[str, Any]) -> int:
 
 def _infer_gpus_per_pod(role: RoleSpec, _cluster_gpus_per_node: int) -> int:
     parallelism = role.parallelism
-    ranks = parallelism.tp * parallelism.dp_size
+    ranks = parallelism.tp * parallelism.pp * parallelism.dp_size
     if ranks % role.lws.size:
         raise ValueError(
-            f"{role.name}: tp={parallelism.tp} x dp={parallelism.dp_size} "
+            f"{role.name}: tp={parallelism.tp} x pp={parallelism.pp} "
+            f"x dp={parallelism.dp_size} "
             f"does not divide evenly across lws.size={role.lws.size}"
         )
     return ranks // role.lws.size

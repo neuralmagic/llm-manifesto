@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 class Feature(StrEnum):
     DATA_PARALLEL = "data-parallel"
+    PIPELINE_PARALLEL = "pipeline-parallel"
     EXPERT_PARALLEL = "expert-parallel"
     PREFILL_DECODE = "prefill-decode"
     LLM_D = "llm-d"
@@ -34,6 +35,7 @@ class FeatureContract:
 
 CONTRACTS: dict[Feature, FeatureContract] = {
     Feature.DATA_PARALLEL: FeatureContract(),
+    Feature.PIPELINE_PARALLEL: FeatureContract(),
     Feature.EXPERT_PARALLEL: FeatureContract(),
     Feature.PREFILL_DECODE: FeatureContract(implies=frozenset({Feature.LLM_D})),
     Feature.LLM_D: FeatureContract(),
@@ -44,6 +46,7 @@ CONTRACTS: dict[Feature, FeatureContract] = {
 class FeatureContext:
     role_name: str
     dp_enabled: bool
+    pipeline_parallel: bool
     expert_parallel: bool
     prefill_decode: bool
     llm_d_enabled: bool
@@ -116,6 +119,7 @@ Detector = Callable[[FeatureContext], bool]
 
 DETECTORS: dict[Feature, Detector] = {
     Feature.DATA_PARALLEL: lambda ctx: ctx.dp_enabled,
+    Feature.PIPELINE_PARALLEL: lambda ctx: ctx.pipeline_parallel,
     Feature.EXPERT_PARALLEL: lambda ctx: ctx.expert_parallel,
     Feature.PREFILL_DECODE: lambda ctx: ctx.prefill_decode,
     Feature.LLM_D: lambda ctx: ctx.llm_d_enabled,
