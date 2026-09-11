@@ -202,7 +202,7 @@ def test_tp8_across_two_pods_derives_four_gpus_per_pod():
     assert "--device-ids 0,1,2,3" in container["args"][0]
 
 
-def test_parallel_layout_must_fit_cluster_gpu_capacity():
+def test_parallel_layout_must_fit_selected_accelerator_gpu_capacity():
     spec = DeploymentSpec.model_validate(
         {
             "release": "oversized",
@@ -216,10 +216,17 @@ def test_parallel_layout_must_fit_cluster_gpu_capacity():
     with pytest.raises(ValueError, match="needs 8 GPUs per pod.*provides 4"):
         spec.apply_cluster_defaults(CLUSTER)
 
+    spec.accelerator = "b200"
+    spec.apply_cluster_defaults(CLUSTER)
+
+    assert spec.role("decode").resources.gpus == 8
+
 
 def test_omitted_resources_use_built_in_per_pod_gpu_formulas():
     cluster = CLUSTER.model_copy(deep=True)
-    cluster.gpus_per_node = 8
+    cluster.accelerators.profiles["gb200"] = cluster.accelerators.profiles[
+        "gb200"
+    ].model_copy(update={"gpus_per_node": 8})
     expected = {
         1: ("8", "128Gi"),
         2: ("10", "128Gi"),
@@ -352,7 +359,7 @@ def test_explicit_resource_gpu_request_overrides_inferred_request():
             ],
         }
     )
-    spec.apply_cluster_defaults(CLUSTER.model_copy(update={"gpus_per_node": 8}))
+    spec.apply_cluster_defaults(CLUSTER)
 
     assert spec.role("prefill").gpus_per_pod == 2
     assert spec.role("prefill").resources.gpus == 1

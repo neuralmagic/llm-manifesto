@@ -224,12 +224,13 @@ roles:
 Each engine replica consumes `tp × pp` GPUs. Local model/DP groups, port fanout,
 and per-pod launch arguments are derived from the workload size and GPUs per
 pod. GPUs per pod is derived as `tp × pp × dp ÷ lws.size`, treating disabled DP
-as one, and must fit the cluster's per-node GPU capacity. Single-node roles
-render as Kubernetes Deployments; roles spanning multiple nodes render as
-LeaderWorkerSets. Set a role's `workload` to `deployment` or `leaderworkerset`
-to override that default. An explicit one-node LeaderWorkerSet can be useful
-when an admission controller integrates with LeaderWorkerSet rather than
-Deployment. Multi-node roles cannot select Deployment.
+as one, and must fit the selected accelerator profile's `gpus_per_node`
+capacity. Single-node roles render as Kubernetes Deployments; roles spanning
+multiple nodes render as LeaderWorkerSets. Set a role's `workload` to
+`deployment` or `leaderworkerset` to override that default. An explicit
+one-node LeaderWorkerSet can be useful when an admission controller integrates
+with LeaderWorkerSet rather than Deployment. Multi-node roles cannot select
+Deployment.
 
 For example, this runs one TP2 × PP2 engine across four GPUs. Increase
 `lws.size` and divide those model-parallel GPUs evenly across pods to span
@@ -310,8 +311,9 @@ unless a spec needs an explicit one-off `model.image`.
 
 Each cluster profile declares its available accelerator profiles and a
 `default`. Specs inherit the selected cluster's default unless they set
-`accelerator`. The selected entry controls accelerator allocation,
-accelerator-specific cache paths, and the development build architecture.
+`accelerator`. The selected entry controls accelerator allocation, per-node GPU
+capacity, accelerator-specific cache paths, and the development build
+architecture.
 
 For model authors, accelerator allocation is cluster-owned: model specs keep
 the same role GPU counts whether the cluster uses extended resources or Dynamic
@@ -324,6 +326,7 @@ accelerators:
   default: b200
   profiles:
     b200:
+      gpus_per_node: 8
       allocation:
         extended_resource:
           resource_name: nvidia.com/gpu
@@ -336,6 +339,7 @@ To use DRA instead, the cluster operator changes only `allocation`:
 
 ```yaml
     b200:
+      gpus_per_node: 8
       allocation:
         dra:
           device_class_name: gpu.nvidia.com

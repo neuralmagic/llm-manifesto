@@ -15,11 +15,11 @@ def _custom_cluster(*, scc: str | None = None) -> Cluster:
         {
             "name": "synthetic-cluster",
             "platform": "openshift",
-            "gpus_per_node": 2,
             "accelerators": {
                 "default": "test",
                 "profiles": {
                     "test": {
+                        "gpus_per_node": 2,
                         "allocation": {
                             "extended_resource": {
                                 "resource_name": "example.com/gpu"

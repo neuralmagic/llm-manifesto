@@ -390,15 +390,16 @@ class DeploymentSpec(BaseModel):
         raise KeyError(f"unknown role: {name}")
 
     def apply_cluster_defaults(self, cluster: Cluster) -> None:
-        cluster.accelerators.get(self.accelerator)
+        accelerator = self.accelerator_config(cluster)
         if self.model.hf_home is None:
             self.model.hf_home = cluster.cache.hf_home
         for role in self.roles:
             gpus_per_pod = role.gpus_per_pod
-            if gpus_per_pod > cluster.gpus_per_node:
+            if gpus_per_pod > accelerator.gpus_per_node:
                 raise ValueError(
                     f"{role.name}: parallel layout needs {gpus_per_pod} GPUs per pod, "
-                    f"but the cluster profile provides {cluster.gpus_per_node}; "
+                    f"but accelerator {self.accelerator or cluster.accelerators.default!r} "
+                    f"provides {accelerator.gpus_per_node}; "
                     "increase lws.size"
                 )
             if "gpus" not in role.resources.model_fields_set:

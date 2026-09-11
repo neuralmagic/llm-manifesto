@@ -3,12 +3,12 @@
 # No shared, host-cache, local-NVMe, logging, or development filesystem is
 # declared. Libraries use container-local defaults and logs stream to stdout.
 name: example-stateless-b200
-gpus_per_node: 8
 
 accelerators:
   default: b200
   profiles:
     b200:
+      gpus_per_node: 8
       allocation:
         extended_resource:
           resource_name: nvidia.com/gpu
