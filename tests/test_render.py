@@ -923,6 +923,17 @@ def test_null_role_vllm_arg_omits_manifesto_default():
     assert "--disable-access-log-for-endpoints" not in script
 
 
+def test_model_revision_is_rendered_as_vllm_revision():
+    spec = load_spec(ROOT / "models" / "qwen" / "aggregated.yaml", CLUSTER)
+    spec.model.revision = "7bc0af58401941643ce20bda71d052dcd2096e80"
+
+    objects = render(spec, user="tester", cluster=CLUSTER)
+    deployment = _find(objects, "Deployment", "decode")
+    script = deployment["spec"]["template"]["spec"]["containers"][0]["args"][0]
+
+    assert "--revision 7bc0af58401941643ce20bda71d052dcd2096e80" in script
+
+
 def test_role_raw_vllm_args_are_appended_without_interpretation():
     spec = load_spec(ROOT / "models" / "qwen" / "aggregated.yaml", CLUSTER)
     role = spec.role("decode")
