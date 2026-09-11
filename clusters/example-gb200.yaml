@@ -3,7 +3,6 @@
 # Copy this file into your private Manifesto config directory and adapt it to
 # your environment. Values here are examples, not a usable cluster inventory.
 name: example-gb200
-gpus_per_node: 4
 
 # Uncomment when users share release names in a namespace.
 # naming:
@@ -13,6 +12,7 @@ accelerators:
   default: gb200
   profiles:
     gb200:
+      gpus_per_node: 4
       allocation:
         extended_resource:
           resource_name: nvidia.com/gpu
@@ -20,6 +20,7 @@ accelerators:
       gpu_arch: gb200
       torch_cuda_arch_list: "10.0+PTX"
     b200:
+      gpus_per_node: 8
       allocation:
         extended_resource:
           resource_name: nvidia.com/gpu

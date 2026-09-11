@@ -4,12 +4,12 @@
 # your environment. Do not commit real storage, network, scheduling, or
 # credential details to this repository.
 name: example-h200
-gpus_per_node: 8
 
 accelerators:
   default: h200
   profiles:
     h200:
+      gpus_per_node: 8
       allocation:
         extended_resource:
           resource_name: nvidia.com/gpu

@@ -394,7 +394,6 @@ def test_idle_shutdown_only_scrapes_cross_node_dp_api_servers(
     role.parallelism.tp = 1
     role.parallelism.pp = 2
     role.parallelism.dp = 2
-    role.parallelism.gpus = 1
     role.resources.gpus = 1
 
     objects = render(spec, user="tester", cluster=CLUSTER)
@@ -848,7 +847,6 @@ def test_single_node_pipeline_parallelism_uses_all_model_parallel_gpus():
     role = spec.role("decode")
     role.parallelism.tp = 2
     role.parallelism.pp = 2
-    role.parallelism.gpus = 4
     role.resources.gpus = 4
 
     objects = render(spec, user="tester", cluster=CLUSTER)
@@ -869,7 +867,6 @@ def test_cross_node_pipeline_parallelism_routes_only_to_group_leader():
     role.lws.size = 2
     role.parallelism.tp = 1
     role.parallelism.pp = 2
-    role.parallelism.gpus = 1
     role.resources.gpus = 1
 
     objects = render(spec, user="tester", cluster=CLUSTER)
@@ -1102,7 +1099,6 @@ def test_routing_disabled_dp2_tp8_uses_internal_vllm_load_balancing():
     decode.lws.size = 4
     decode.parallelism.tp = 8
     decode.parallelism.dp = 2
-    decode.parallelism.gpus = 4
     decode.resources.gpus = 4
 
     objects = render(spec, user="tester", cluster=CLUSTER)

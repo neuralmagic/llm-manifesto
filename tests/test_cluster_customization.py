@@ -15,11 +15,11 @@ def _custom_cluster(*, scc: str | None = None) -> Cluster:
         {
             "name": "synthetic-cluster",
             "platform": "openshift",
-            "gpus_per_node": 2,
             "accelerators": {
                 "default": "test",
                 "profiles": {
                     "test": {
+                        "gpus_per_node": 2,
                         "allocation": {
                             "extended_resource": {
                                 "resource_name": "example.com/gpu"
@@ -101,7 +101,7 @@ def _spec(cluster: Cluster) -> DeploymentSpec:
                 {
                     "name": "decode",
                     "lws": {"size": 2, "replicas": 1},
-                    "parallelism": {"tp": 1, "dp": 4, "ep": True, "gpus": 2},
+                    "parallelism": {"tp": 1, "dp": 4, "ep": True},
                     "resources": {"cpu": "4", "memory": "16Gi", "gpus": 2},
                 }
             ],
