@@ -124,7 +124,6 @@ class ParallelismSpec(BaseModel):
     pp: int = Field(1, ge=1)
     dp: int | bool | None = None
     ep: bool = False
-    gpus: int | None = Field(None, ge=1, validation_alias=AliasChoices("gpus", "gpus_per_node"))
 
     @field_validator("dp")
     @classmethod
@@ -195,9 +194,7 @@ class RoleSpec(BaseModel):
 
     @property
     def gpus_per_pod(self) -> int:
-        if self.parallelism.gpus is not None:
-            return self.parallelism.gpus
-        return DEFAULT_GPUS_PER_POD
+        return _derive_gpus_per_pod(self)
 
     @model_validator(mode="after")
     def validate_role_configuration(self) -> "RoleSpec":
@@ -397,17 +394,22 @@ class DeploymentSpec(BaseModel):
         if self.model.hf_home is None:
             self.model.hf_home = cluster.cache.hf_home
         for role in self.roles:
-            if role.parallelism.gpus is None:
-                role.parallelism.gpus = _infer_gpus_per_pod(role, cluster.gpus_per_node)
+            gpus_per_pod = role.gpus_per_pod
+            if gpus_per_pod > cluster.gpus_per_node:
+                raise ValueError(
+                    f"{role.name}: parallel layout needs {gpus_per_pod} GPUs per pod, "
+                    f"but the cluster profile provides {cluster.gpus_per_node}; "
+                    "increase lws.size"
+                )
             if "gpus" not in role.resources.model_fields_set:
-                role.resources.gpus = role.gpus_per_pod
+                role.resources.gpus = gpus_per_pod
             if "cpu" not in role.resources.model_fields_set:
                 role.resources.cpu = str(
-                    DEFAULT_CPU_BASE + DEFAULT_CPU_PER_GPU * role.gpus_per_pod
+                    DEFAULT_CPU_BASE + DEFAULT_CPU_PER_GPU * gpus_per_pod
                 )
             if "memory" not in role.resources.model_fields_set:
                 memory_gi = max(
-                    DEFAULT_MEMORY_PER_GPU_GI * role.gpus_per_pod,
+                    DEFAULT_MEMORY_PER_GPU_GI * gpus_per_pod,
                     DEFAULT_MINIMUM_MEMORY_GI,
                 )
                 role.resources.memory = f"{memory_gi}Gi"
@@ -422,7 +424,7 @@ def _api_server_count(vllm_args: dict[str, Any]) -> int:
         return 1
 
 
-def _infer_gpus_per_pod(role: RoleSpec, _cluster_gpus_per_node: int) -> int:
+def _derive_gpus_per_pod(role: RoleSpec) -> int:
     parallelism = role.parallelism
     ranks = parallelism.tp * parallelism.pp * parallelism.dp_size
     if ranks % role.lws.size:

@@ -135,7 +135,6 @@ def test_equations_get_pipeline_and_model_parallel_scopes():
     role = spec.role("decode")
     role.parallelism.tp = 2
     role.parallelism.pp = 2
-    role.parallelism.gpus = 4
     role.resources.gpus = 4
     role.computed["env"] = {
         "PP_WORLD": "pp_world_size",
@@ -168,6 +167,54 @@ def test_single_gpu_no_dp_role_derives_one_gpu_from_tp():
     assert role.resources.gpus == 1
     assert role.resources.cpu == "8"
     assert role.resources.memory == "64Gi"
+
+
+def test_tp8_across_two_pods_derives_four_gpus_per_pod():
+    spec = DeploymentSpec.model_validate(
+        {
+            "release": "tp8",
+            "topology": "aggregated",
+            "model": {"id": "model", "image": "image"},
+            "routing": {"kind": "disabled"},
+            "roles": [
+                {
+                    "name": "decode",
+                    "lws": {"size": 2},
+                    "parallelism": {"tp": 8},
+                }
+            ],
+        }
+    )
+
+    spec.apply_cluster_defaults(CLUSTER)
+
+    role = spec.role("decode")
+    assert role.gpus_per_pod == 4
+    assert role.resources.gpus == 4
+    objects = render(spec, user="tester", cluster=CLUSTER)
+    workload = next(obj for obj in objects if obj["kind"] == "LeaderWorkerSet")
+    container = workload["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"][
+        "containers"
+    ][0]
+    assert workload["spec"]["leaderWorkerTemplate"]["size"] == 2
+    assert container["resources"]["requests"]["nvidia.com/gpu"] == "4"
+    assert "--tensor-parallel-size 8" in container["args"][0]
+    assert "--device-ids 0,1,2,3" in container["args"][0]
+
+
+def test_parallel_layout_must_fit_cluster_gpu_capacity():
+    spec = DeploymentSpec.model_validate(
+        {
+            "release": "oversized",
+            "topology": "aggregated",
+            "model": {"id": "model", "image": "image"},
+            "routing": {"kind": "disabled"},
+            "roles": [{"name": "decode", "parallelism": {"tp": 8}}],
+        }
+    )
+
+    with pytest.raises(ValueError, match="needs 8 GPUs per pod.*provides 4"):
+        spec.apply_cluster_defaults(CLUSTER)
 
 
 def test_omitted_resources_use_built_in_per_pod_gpu_formulas():

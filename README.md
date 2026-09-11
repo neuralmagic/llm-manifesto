@@ -223,13 +223,13 @@ roles:
 `tp`, `pp`, and `dp` are global tensor-, pipeline-, and data-parallel sizes.
 Each engine replica consumes `tp × pp` GPUs. Local model/DP groups, port fanout,
 and per-pod launch arguments are derived from the workload size and GPUs per
-pod. GPUs per pod is inferred from the parallel layout and the cluster profile;
-set `parallelism.gpus` to override it. Single-node roles render as Kubernetes
-Deployments; roles spanning multiple nodes render as LeaderWorkerSets. Set a
-role's `workload` to `deployment` or `leaderworkerset` to override that default.
-An explicit one-node LeaderWorkerSet can be useful when an admission controller
-integrates with LeaderWorkerSet rather than Deployment. Multi-node roles cannot
-select Deployment.
+pod. GPUs per pod is derived as `tp × pp × dp ÷ lws.size`, treating disabled DP
+as one, and must fit the cluster's per-node GPU capacity. Single-node roles
+render as Kubernetes Deployments; roles spanning multiple nodes render as
+LeaderWorkerSets. Set a role's `workload` to `deployment` or `leaderworkerset`
+to override that default. An explicit one-node LeaderWorkerSet can be useful
+when an admission controller integrates with LeaderWorkerSet rather than
+Deployment. Multi-node roles cannot select Deployment.
 
 For example, this runs one TP2 × PP2 engine across four GPUs. Increase
 `lws.size` and divide those model-parallel GPUs evenly across pods to span
