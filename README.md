@@ -223,13 +223,14 @@ roles:
 `tp`, `pp`, and `dp` are global tensor-, pipeline-, and data-parallel sizes.
 Each engine replica consumes `tp × pp` GPUs. Local model/DP groups, port fanout,
 and per-pod launch arguments are derived from the workload size and GPUs per
-pod. GPUs per pod is inferred from the parallel layout and the cluster profile;
-set `parallelism.gpus` to override it. Single-node roles render as Kubernetes
-Deployments; roles spanning multiple nodes render as LeaderWorkerSets. Set a
-role's `workload` to `deployment` or `leaderworkerset` to override that default.
-An explicit one-node LeaderWorkerSet can be useful when an admission controller
-integrates with LeaderWorkerSet rather than Deployment. Multi-node roles cannot
-select Deployment.
+pod. GPUs per pod is derived as `tp × pp × dp ÷ lws.size`, treating disabled DP
+as one, and must fit the selected accelerator profile's `gpus_per_node`
+capacity. Single-node roles render as Kubernetes Deployments; roles spanning
+multiple nodes render as LeaderWorkerSets. Set a role's `workload` to
+`deployment` or `leaderworkerset` to override that default. An explicit
+one-node LeaderWorkerSet can be useful when an admission controller integrates
+with LeaderWorkerSet rather than Deployment. Multi-node roles cannot select
+Deployment.
 
 For example, this runs one TP2 × PP2 engine across four GPUs. Increase
 `lws.size` and divide those model-parallel GPUs evenly across pods to span
@@ -314,8 +315,9 @@ accepted in a role's `vllm:`, computed vLLM arguments, or `vllm_raw_args`.
 
 Each cluster profile declares its available accelerator profiles and a
 `default`. Specs inherit the selected cluster's default unless they set
-`accelerator`. The selected entry controls accelerator allocation,
-accelerator-specific cache paths, and the development build architecture.
+`accelerator`. The selected entry controls accelerator allocation, per-node GPU
+capacity, accelerator-specific cache paths, and the development build
+architecture.
 
 For model authors, accelerator allocation is cluster-owned: model specs keep
 the same role GPU counts whether the cluster uses extended resources or Dynamic
@@ -328,6 +330,7 @@ accelerators:
   default: b200
   profiles:
     b200:
+      gpus_per_node: 8
       allocation:
         extended_resource:
           resource_name: nvidia.com/gpu
@@ -340,6 +343,7 @@ To use DRA instead, the cluster operator changes only `allocation`:
 
 ```yaml
     b200:
+      gpus_per_node: 8
       allocation:
         dra:
           device_class_name: gpu.nvidia.com
@@ -716,6 +720,13 @@ or digest. Custom and dev builds can force a fresh namespace explicitly:
 cache:
   key: dev-build-42
 ```
+
+For Deployment model pods, writable JIT caches live on a size-limited pod
+`emptyDir` (using the role's `ephemeral_storage` value, or 32Gi by default).
+They survive container restarts and disappear when Kubernetes removes the pod,
+so rollouts do not leave old cache directories on the persistent filesystem.
+The Hugging Face model cache remains on the configured shared or host volume.
+LeaderWorkerSet roles continue using the configured persistent JIT cache paths.
 
 When persistent cache storage is configured, model pods clear their JIT and
 compilation caches after a failed process exit, or when the same container

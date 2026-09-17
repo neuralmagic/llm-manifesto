@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from manifesto.cluster import load_cluster
 from manifesto.instance import Instance
@@ -18,8 +19,18 @@ def test_clusters_define_their_accelerators_and_default():
     assert CLUSTER.accelerators.default == "gb200"
     assert {"gb200", "b200"} == set(CLUSTER.accelerators.profiles)
     assert CLUSTER.accelerators.get().gpu_arch == "gb200"
+    assert CLUSTER.accelerators.get("gb200").gpus_per_node == 4
+    assert CLUSTER.accelerators.get("b200").gpus_per_node == 8
     assert EXAMPLE_H200.accelerators.default == "h200"
     assert EXAMPLE_H200.accelerators.get().torch_cuda_arch_list == "9.0"
+
+
+def test_cluster_rejects_root_level_gpu_capacity():
+    data = CLUSTER.model_dump(mode="json")
+    data["gpus_per_node"] = 4
+
+    with pytest.raises(ValidationError, match="gpus_per_node"):
+        type(CLUSTER).model_validate(data)
 
 
 def test_deployments_inherit_default_and_can_override_accelerator():

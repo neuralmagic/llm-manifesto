@@ -32,24 +32,11 @@ def test_uneven_global_dp_split_is_an_error():
         {
             "name": "decode",
             "lws": {"size": 4},
-            "parallelism": {"gpus_per_node": 4, "tp": 1, "dp": 10, "ep": True},
+            "parallelism": {"tp": 1, "dp": 10, "ep": True},
         }
     )
 
-    with pytest.raises(ValueError, match="dp=10 does not divide evenly across 4 LWS nodes"):
-        parallel_layout(role)
-
-
-def test_uneven_global_tp_split_is_an_error():
-    role = _role(
-        {
-            "name": "prefill",
-            "lws": {"size": 3},
-            "parallelism": {"gpus_per_node": 4, "tp": 10, "dp": False, "ep": True},
-        }
-    )
-
-    with pytest.raises(ValueError, match="tp=10 is not divisible by 4 GPUs per pod"):
+    with pytest.raises(ValueError, match="does not divide evenly across lws.size=4"):
         parallel_layout(role)
 
 
@@ -58,7 +45,7 @@ def test_cross_node_tp_with_dp_uses_one_global_lws_node_rank_space():
         {
             "name": "decode",
             "lws": {"size": 16},
-            "parallelism": {"gpus_per_node": 4, "tp": 16, "dp": 4, "ep": True},
+            "parallelism": {"tp": 16, "dp": 4, "ep": True},
         }
     )
 
@@ -68,24 +55,11 @@ def test_cross_node_tp_with_dp_uses_one_global_lws_node_rank_space():
     assert layout.distributed_dp is True
 
 
-def test_cross_node_tp_with_dp_requires_all_tp_groups_in_one_lws_group():
-    role = _role(
-        {
-            "name": "decode",
-            "lws": {"size": 2, "replicas": 1},
-            "parallelism": {"gpus_per_node": 4, "tp": 8, "dp": 2, "ep": True},
-        }
-    )
-
-    with pytest.raises(ValueError, match="needs lws.size=4"):
-        parallel_layout(role)
-
-
 def test_single_node_pipeline_parallel_layout_uses_tp_times_pp_gpus():
     role = _role(
         {
             "name": "decode",
-            "parallelism": {"gpus_per_node": 4, "tp": 2, "pp": 2, "dp": False},
+            "parallelism": {"tp": 2, "pp": 2, "dp": False},
         }
     )
 
@@ -104,7 +78,7 @@ def test_cross_node_pipeline_parallel_layout_uses_one_api_server():
         {
             "name": "decode",
             "lws": {"size": 2},
-            "parallelism": {"gpus_per_node": 1, "tp": 1, "pp": 2, "dp": False},
+            "parallelism": {"tp": 1, "pp": 2, "dp": False},
         }
     )
 
@@ -121,7 +95,7 @@ def test_pipeline_parallelism_combines_with_distributed_dp():
         {
             "name": "decode",
             "lws": {"size": 4},
-            "parallelism": {"gpus_per_node": 2, "tp": 2, "pp": 2, "dp": 2},
+            "parallelism": {"tp": 2, "pp": 2, "dp": 2},
         }
     )
 
@@ -133,19 +107,6 @@ def test_pipeline_parallelism_combines_with_distributed_dp():
     assert layout.dp_local_size == 1
     assert layout.distributed_dp is True
     assert layout.serving_worker_indices == (0, 2)
-
-
-def test_cross_node_pipeline_parallelism_requires_complete_groups():
-    role = _role(
-        {
-            "name": "decode",
-            "lws": {"size": 1},
-            "parallelism": {"gpus_per_node": 2, "tp": 2, "pp": 2, "dp": False},
-        }
-    )
-
-    with pytest.raises(ValueError, match="needs lws.size=2"):
-        parallel_layout(role)
 
 
 @pytest.mark.parametrize(
@@ -194,42 +155,16 @@ def test_unknown_model_field_is_rejected():
         DeploymentSpec.model_validate(data)
 
 
-def test_idle_gpus_without_dp_is_an_error():
-    role = _role(
-        {
-            "name": "prefill",
-            "lws": {"size": 1},
-            "parallelism": {"gpus_per_node": 4, "tp": 2, "dp": False, "ep": True},
-        }
-    )
-
-    with pytest.raises(ValueError, match="DP is disabled but local TP 2 leaves 2 of 4 GPUs idle"):
-        parallel_layout(role)
-
-
-def test_dp_tp_gpu_partition_mismatch_is_an_error():
+def test_derived_gpus_must_partition_model_parallel_groups():
     role = _role(
         {
             "name": "decode",
-            "lws": {"size": 4},
-            "parallelism": {"gpus_per_node": 4, "tp": 2, "dp": 4, "ep": True},
+            "lws": {"size": 3},
+            "parallelism": {"tp": 6, "dp": 2, "ep": True},
         }
     )
 
-    with pytest.raises(ValueError, match="needs 2 GPUs per pod, got 4"):
-        parallel_layout(role)
-
-
-def test_gpus_not_divisible_by_local_tp_is_an_error():
-    role = _role(
-        {
-            "name": "decode",
-            "lws": {"size": 1},
-            "parallelism": {"gpus_per_node": 4, "tp": 3, "dp": False, "ep": True},
-        }
-    )
-
-    with pytest.raises(ValueError, match="4 GPUs per pod is not divisible by local TP 3"):
+    with pytest.raises(ValueError, match="tp=6 is not divisible by 4 GPUs per pod"):
         parallel_layout(role)
 
 
@@ -283,7 +218,7 @@ def test_routing_proxy_sets_default_port_bases():
         {
             "name": "decode",
             "lws": {"size": 4},
-            "parallelism": {"gpus_per_node": 4, "tp": 1, "dp": 16, "ep": True},
+            "parallelism": {"tp": 1, "dp": 16, "ep": True},
             "routing_proxy": True,
         }
     )
@@ -303,7 +238,7 @@ def test_routing_proxy_requires_llm_d_routing():
                 {
                     "name": "decode",
                     "lws": {"size": 4},
-                    "parallelism": {"gpus_per_node": 4, "tp": 1, "dp": 16, "ep": True},
+                    "parallelism": {"tp": 1, "dp": 16, "ep": True},
                     "routing_proxy": True,
                 }
             )
@@ -315,7 +250,7 @@ def test_llm_d_with_data_parallelism_infers_external_dp():
         {
             "name": "decode",
             "lws": {"size": 4},
-            "parallelism": {"gpus_per_node": 4, "tp": 1, "dp": 16, "ep": True},
+            "parallelism": {"tp": 1, "dp": 16, "ep": True},
         }
     )
     data["routing"] = {"kind": "load_aware"}
@@ -331,7 +266,7 @@ def test_direct_vllm_with_data_parallelism_uses_internal_dp():
             {
                 "name": "decode",
                 "lws": {"size": 4},
-                "parallelism": {"gpus_per_node": 4, "tp": 1, "dp": 16, "ep": True},
+                "parallelism": {"tp": 1, "dp": 16, "ep": True},
             }
         )
     )
@@ -344,7 +279,7 @@ def test_explicit_dp_mode_must_match_derived_serving_mode():
         {
             "name": "decode",
             "lws": {"size": 4},
-            "parallelism": {"gpus_per_node": 4, "tp": 1, "dp": 16, "ep": True},
+            "parallelism": {"tp": 1, "dp": 16, "ep": True},
             "dp_load_balancing": "internal",
         }
     )
@@ -359,7 +294,7 @@ def test_external_dp_with_multiple_api_servers_is_an_error():
         {
             "name": "decode",
             "lws": {"size": 4},
-            "parallelism": {"gpus_per_node": 4, "tp": 1, "dp": 16, "ep": True},
+            "parallelism": {"tp": 1, "dp": 16, "ep": True},
             "vllm": {"api_server_count": 4},
         }
     )
@@ -379,12 +314,12 @@ def test_pd_topology_sets_decode_proxy_without_role_flag():
                 {
                     "name": "decode",
                     "lws": {"size": 4},
-                    "parallelism": {"gpus_per_node": 4, "tp": 1, "dp": 16, "ep": True},
+                    "parallelism": {"tp": 1, "dp": 16, "ep": True},
                 },
                 {
                     "name": "prefill",
                     "lws": {"size": 2},
-                    "parallelism": {"gpus_per_node": 4, "tp": 8, "dp": False, "ep": True},
+                    "parallelism": {"tp": 8, "dp": False, "ep": True},
                 },
             ],
         }
@@ -396,20 +331,18 @@ def test_pd_topology_sets_decode_proxy_without_role_flag():
     assert spec.role("prefill").routing_proxy is False
 
 
-def test_parallelism_gpus_alias_still_parses():
-    spec = DeploymentSpec.model_validate(
-        _spec_with_role(
-            {
-                "name": "decode",
-                "lws": {"size": 4},
-                "parallelism": {"gpus": 4, "tp": 1, "dp": 16, "ep": True},
-            }
+@pytest.mark.parametrize("field", ["gpus", "gpus_per_node"])
+def test_parallelism_rejects_authored_gpu_counts(field):
+    with pytest.raises(ValidationError, match=field):
+        DeploymentSpec.model_validate(
+            _spec_with_role(
+                {
+                    "name": "decode",
+                    "lws": {"size": 4},
+                    "parallelism": {field: 4, "tp": 1, "dp": 16, "ep": True},
+                }
+            )
         )
-    )
-
-    role = spec.role("decode")
-    assert role.lws.size == 4
-    assert role.gpus_per_pod == 4
 
 
 def test_unknown_role_keys_are_rejected():

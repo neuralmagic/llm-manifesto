@@ -394,7 +394,6 @@ def test_idle_shutdown_only_scrapes_cross_node_dp_api_servers(
     role.parallelism.tp = 1
     role.parallelism.pp = 2
     role.parallelism.dp = 2
-    role.parallelism.gpus = 1
     role.resources.gpus = 1
 
     objects = render(spec, user="tester", cluster=CLUSTER)
@@ -508,6 +507,8 @@ def test_crash_cleanup_clears_compilation_caches_but_preserves_autotuning():
     script = workload["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"]["containers"][0]["args"][0]
 
     assert '.manifesto-running-${HOSTNAME}-${MANIFESTO_POD_UID}' in script
+    assert 'export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT}/${HOSTNAME}"' in script
+    assert 'export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR}/${HOSTNAME}"' in script
     assert 'if [ "$STATUS" -ne 0 ]; then' in script
     assert 'find "$VLLM_CACHE_ROOT" -type d -name torch_compile_cache' in script
     assert '${FLASHINFER_CACHE_DIR:-}' in script
@@ -528,15 +529,45 @@ def test_crash_cleanup_clears_compilation_caches_but_preserves_autotuning():
     }
 
 
+def test_deployment_jit_caches_follow_pod_lifetime():
+    spec = load_spec(ROOT / "models" / "qwen" / "qwen3-0.6b.yaml", CLUSTER)
+    deployment = _find(render(spec, user="tester", cluster=CLUSTER), "Deployment", "decode")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    container = pod_spec["containers"][0]
+    env = {item["name"]: item["value"] for item in container["env"] if "value" in item}
+
+    assert {volume["name"]: volume for volume in pod_spec["volumes"]}["pod-jit-cache"] == {
+        "name": "pod-jit-cache",
+        "emptyDir": {"sizeLimit": "32Gi"},
+    }
+    assert {mount["name"]: mount["mountPath"] for mount in container["volumeMounts"]}[
+        "pod-jit-cache"
+    ] == "/var/cache/manifesto-pod"
+    pod_cache_root = f"/var/cache/manifesto-pod/jit-cache/b200/cu13/{spec.cache_key}/{spec.release}"
+    assert {env[name] for name in (
+        "HOME", "XDG_CACHE_HOME", "VLLM_CACHE_ROOT", "FLASHINFER_CACHE_DIR",
+        "FLASHINFER_WORKSPACE_BASE", "FLASH_ATTENTION_CUTE_DSL_CACHE_DIR",
+        "TRITON_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR", "TILELANG_CACHE_DIR",
+    )} == {
+        f"{pod_cache_root}/{directory}"
+        for directory in (
+            "home", "xdg", "vllm", "flashinfer", "flashinfer-workspace",
+            "fa-cute-dsl", "triton", "torchinductor", "tilelang",
+        )
+    }
+    assert 'export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT}/${HOSTNAME}"' in container["args"][0]
+
+
 def test_failed_launch_removes_compile_files_and_keeps_autotune_files(tmp_path):
     objects = _objects(DEEPSEEK)
     workload = _find(objects, "LeaderWorkerSet", "decode")
     script = workload["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"]["containers"][0]["args"][0]
+    cache_setup = script.split("set -euo pipefail\n", 1)[1].split("LOG_DIR=", 1)[0]
     cleanup_body = script.split("CRASH_MARKER=", 1)[1].split(
         "trap on_exit EXIT", 1
     )[0]
     cleanup_body += "trap on_exit EXIT"
-    cleanup_preamble = f"set -euo pipefail\nCRASH_MARKER={cleanup_body}"
+    cleanup_preamble = f"set -euo pipefail\n{cache_setup}CRASH_MARKER={cleanup_body}"
 
     cache_paths = {
         "VLLM_CACHE_ROOT": tmp_path / "vllm",
@@ -545,13 +576,27 @@ def test_failed_launch_removes_compile_files_and_keeps_autotune_files(tmp_path):
         "TRITON_CACHE_DIR": tmp_path / "triton",
         "TORCHINDUCTOR_CACHE_DIR": tmp_path / "torchinductor",
         "TILELANG_CACHE_DIR": tmp_path / "tilelang",
+        "FLASHINFER_WORKSPACE_BASE": tmp_path / "flashinfer-workspace",
+        "XDG_CACHE_HOME": tmp_path / "xdg",
+        "HOME": tmp_path / "home",
     }
     compile_dirs = [
-        cache_paths["VLLM_CACHE_ROOT"] / "rank0" / "torch_compile_cache",
-        *(path for name, path in cache_paths.items() if name != "VLLM_CACHE_ROOT"),
+        cache_paths["VLLM_CACHE_ROOT"] / "test-pod" / "rank0" / "torch_compile_cache",
+        *(
+            cache_paths[name] / "test-pod"
+            for name in (
+                "FLASHINFER_CACHE_DIR",
+                "FLASH_ATTENTION_CUTE_DSL_CACHE_DIR",
+                "TRITON_CACHE_DIR",
+                "TORCHINDUCTOR_CACHE_DIR",
+                "TILELANG_CACHE_DIR",
+            )
+        ),
     ]
-    autotune_dir = cache_paths["VLLM_CACHE_ROOT"] / "flashinfer_autotune_cache"
-    for path in [*compile_dirs, autotune_dir]:
+    other_pod_cache = cache_paths["VLLM_CACHE_ROOT"] / "other-pod" / "rank1" / "torch_compile_cache"
+    other_pod_triton = cache_paths["TRITON_CACHE_DIR"] / "other-pod"
+    autotune_dir = cache_paths["VLLM_CACHE_ROOT"] / "test-pod" / "flashinfer_autotune_cache"
+    for path in [*compile_dirs, autotune_dir, other_pod_cache, other_pod_triton]:
         path.mkdir(parents=True)
         (path / "cached").write_text("data")
 
@@ -569,6 +614,8 @@ def test_failed_launch_removes_compile_files_and_keeps_autotune_files(tmp_path):
     assert result.returncode == 23
     assert all(not path.exists() for path in compile_dirs)
     assert (autotune_dir / "cached").read_text() == "data"
+    assert (other_pod_cache / "cached").read_text() == "data"
+    assert (other_pod_triton / "cached").read_text() == "data"
 
 
 def test_crash_cleanup_can_be_disabled():
@@ -848,7 +895,6 @@ def test_single_node_pipeline_parallelism_uses_all_model_parallel_gpus():
     role = spec.role("decode")
     role.parallelism.tp = 2
     role.parallelism.pp = 2
-    role.parallelism.gpus = 4
     role.resources.gpus = 4
 
     objects = render(spec, user="tester", cluster=CLUSTER)
@@ -869,7 +915,6 @@ def test_cross_node_pipeline_parallelism_routes_only_to_group_leader():
     role.lws.size = 2
     role.parallelism.tp = 1
     role.parallelism.pp = 2
-    role.parallelism.gpus = 1
     role.resources.gpus = 1
 
     objects = render(spec, user="tester", cluster=CLUSTER)
@@ -1113,7 +1158,6 @@ def test_routing_disabled_dp2_tp8_uses_internal_vllm_load_balancing():
     decode.lws.size = 4
     decode.parallelism.tp = 8
     decode.parallelism.dp = 2
-    decode.parallelism.gpus = 4
     decode.resources.gpus = 4
 
     objects = render(spec, user="tester", cluster=CLUSTER)
@@ -1288,7 +1332,11 @@ def test_example_h200_cluster_uses_generic_cache_and_rdma_settings():
     assert "NCCL_IB_HCA" not in env
     assert "NVSHMEM_HCA_PREFIX" not in env
     assert env["HF_HUB_CACHE"] == "/var/cache/huggingface"
-    assert env["FLASHINFER_WORKSPACE_BASE"] == "/var/cache/manifesto/flashinfer"
+    assert env["FLASHINFER_WORKSPACE_BASE"].startswith(
+        "/var/cache/manifesto-pod/jit-cache/h200/cu13/"
+    )
+    assert env["FLASHINFER_WORKSPACE_BASE"].endswith("/flashinfer-workspace")
+    assert volumes["pod-jit-cache"]["emptyDir"] == {"sizeLimit": "128Gi"}
     assert "MAX_TOKENS" not in env
     assert "--max-num-batched-tokens" not in script
     assert "--max-num-seqs" not in script

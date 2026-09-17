@@ -19,6 +19,18 @@ from .spec import DeploymentSpec, RoleSpec, RoutingKind, TopologyKind
 DEFAULT_VLLM_ARGS: dict[str, Any] = {
     "disable_access_log_for_endpoints": "/health,/v1/models,/metrics",
 }
+POD_CACHE_MOUNT = "/var/cache/manifesto-pod"
+POD_CACHE_DIRS = {
+    "HOME": "home",
+    "XDG_CACHE_HOME": "xdg",
+    "VLLM_CACHE_ROOT": "vllm",
+    "FLASHINFER_CACHE_DIR": "flashinfer",
+    "FLASHINFER_WORKSPACE_BASE": "flashinfer-workspace",
+    "FLASH_ATTENTION_CUTE_DSL_CACHE_DIR": "fa-cute-dsl",
+    "TRITON_CACHE_DIR": "triton",
+    "TORCHINDUCTOR_CACHE_DIR": "torchinductor",
+    "TILELANG_CACHE_DIR": "tilelang",
+}
 
 
 @dataclass(frozen=True)
@@ -126,6 +138,15 @@ def resolve_role(spec: DeploymentSpec, instance: Instance, cluster: Cluster, rol
             explicit_env=frozenset(env),
         )
     )
+    if cache_prefix and features.workload_kind == WorkloadKind.DEPLOYMENT:
+        pod_cache_root = (
+            f"{POD_CACHE_MOUNT}/jit-cache/"
+            f"{spec.accelerator_config(cluster).gpu_arch}/{spec.cache.cuda}/"
+            f"{spec.cache_key}/{instance.release_slug}"
+        )
+        for name, directory in POD_CACHE_DIRS.items():
+            env[name] = f"{pod_cache_root}/{directory}"
+            env_provenance[name] = "manifesto:pod cache"
 
     return ResolvedRole(
         ports=ports,
