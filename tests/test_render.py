@@ -530,6 +530,35 @@ def test_crash_cleanup_clears_compilation_caches_but_preserves_autotuning():
     }
 
 
+def test_deployment_jit_caches_follow_pod_lifetime():
+    spec = load_spec(ROOT / "models" / "qwen" / "qwen3-0.6b.yaml", CLUSTER)
+    deployment = _find(render(spec, user="tester", cluster=CLUSTER), "Deployment", "decode")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    container = pod_spec["containers"][0]
+    env = {item["name"]: item["value"] for item in container["env"] if "value" in item}
+
+    assert {volume["name"]: volume for volume in pod_spec["volumes"]}["pod-jit-cache"] == {
+        "name": "pod-jit-cache",
+        "emptyDir": {"sizeLimit": "32Gi"},
+    }
+    assert {mount["name"]: mount["mountPath"] for mount in container["volumeMounts"]}[
+        "pod-jit-cache"
+    ] == "/var/cache/manifesto-pod"
+    pod_cache_root = f"/var/cache/manifesto-pod/jit-cache/b200/cu13/{spec.cache_key}/{spec.release}"
+    assert {env[name] for name in (
+        "HOME", "XDG_CACHE_HOME", "VLLM_CACHE_ROOT", "FLASHINFER_CACHE_DIR",
+        "FLASHINFER_WORKSPACE_BASE", "FLASH_ATTENTION_CUTE_DSL_CACHE_DIR",
+        "TRITON_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR", "TILELANG_CACHE_DIR",
+    )} == {
+        f"{pod_cache_root}/{directory}"
+        for directory in (
+            "home", "xdg", "vllm", "flashinfer", "flashinfer-workspace",
+            "fa-cute-dsl", "triton", "torchinductor", "tilelang",
+        )
+    }
+    assert 'export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT}/${HOSTNAME}"' in container["args"][0]
+
+
 def test_failed_launch_removes_compile_files_and_keeps_autotune_files(tmp_path):
     objects = _objects(DEEPSEEK)
     workload = _find(objects, "LeaderWorkerSet", "decode")
@@ -1296,7 +1325,11 @@ def test_example_h200_cluster_uses_generic_cache_and_rdma_settings():
     assert "NCCL_IB_HCA" not in env
     assert "NVSHMEM_HCA_PREFIX" not in env
     assert env["HF_HUB_CACHE"] == "/var/cache/huggingface"
-    assert env["FLASHINFER_WORKSPACE_BASE"] == "/var/cache/manifesto/flashinfer"
+    assert env["FLASHINFER_WORKSPACE_BASE"].startswith(
+        "/var/cache/manifesto-pod/jit-cache/h200/cu13/"
+    )
+    assert env["FLASHINFER_WORKSPACE_BASE"].endswith("/flashinfer-workspace")
+    assert volumes["pod-jit-cache"]["emptyDir"] == {"sizeLimit": "128Gi"}
     assert "MAX_TOKENS" not in env
     assert "--max-num-batched-tokens" not in script
     assert "--max-num-seqs" not in script
