@@ -73,6 +73,7 @@ def _assert_dra_pair(objects: list[dict], workload_kind: str, count: int) -> Non
 
 def test_accelerator_requires_exactly_one_allocation_backend():
     common = {
+        "gpus_per_node": 8,
         "presence_label": "nvidia.com/gpu.present",
         "gpu_arch": "test",
         "torch_cuda_arch_list": "10.0",

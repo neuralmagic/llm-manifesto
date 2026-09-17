@@ -190,6 +190,7 @@ class AcceleratorAllocationConfig(BaseModel):
 class AcceleratorConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    gpus_per_node: int = Field(ge=1)
     allocation: AcceleratorAllocationConfig
     presence_label: str
     node_selector: dict[str, str] = Field(default_factory=dict)
@@ -340,7 +341,6 @@ class Cluster(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    gpus_per_node: int = Field(ge=1)
     accelerators: AcceleratorsConfig
     platform: Literal["kubernetes", "openshift"] = "kubernetes"
     naming: NamingConfig = Field(default_factory=NamingConfig)
