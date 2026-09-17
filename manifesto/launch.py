@@ -66,6 +66,22 @@ def build_launch_script(
     layout = parallel_layout(role)
     cleanup_cache = persistent_cache and spec.cache.cleanup_on_crash
     lines = ["set -euo pipefail"]
+    if persistent_cache:
+        # A deployment shares its cache prefix across pods. Scope writable JIT
+        # caches before crash cleanup so one pod cannot remove another's files.
+        for name in (
+            "HOME",
+            "XDG_CACHE_HOME",
+            "VLLM_CACHE_ROOT",
+            "FLASHINFER_CACHE_DIR",
+            "FLASHINFER_WORKSPACE_BASE",
+            "FLASH_ATTENTION_CUTE_DSL_CACHE_DIR",
+            "TRITON_CACHE_DIR",
+            "TORCHINDUCTOR_CACHE_DIR",
+            "TILELANG_CACHE_DIR",
+        ):
+            lines.append(f'export {name}="${{{name}}}/${{HOSTNAME}}"')
+        lines.append("")
     if log_dir:
         lines += [
             f"LOG_DIR={shlex.quote(log_dir)}",
