@@ -272,6 +272,8 @@ def build_launch_script(
         ]
     if role.kv_transfer_config:
         base_args.append(["--kv_transfer_config", shlex.quote(json.dumps(role.kv_transfer_config, separators=(",", ":")))])
+    if spec.model.revision:
+        base_args.append(["--revision", shlex.quote(spec.model.revision)])
     if spec.model.served_name:
         base_args.append(["--served-model-name", shlex.quote(spec.model.served_name)])
     for name, value in (vllm_args or role.vllm_args).items():

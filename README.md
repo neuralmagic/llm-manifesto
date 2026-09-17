@@ -309,6 +309,10 @@ Image versions are centralized in `config/images.yaml`. Model specs should use
 `model.image_ref`, with `vllm.standard` as the shared vLLM image reference,
 unless a spec needs an explicit one-off `model.image`.
 
+Set `model.revision` to pin the model repository to a branch, tag, or commit.
+Manifesto renders it as vLLM's `--revision` argument for every role; it is not
+accepted in a role's `vllm:`, computed vLLM arguments, or `vllm_raw_args`.
+
 Each cluster profile declares its available accelerator profiles and a
 `default`. Specs inherit the selected cluster's default unless they set
 `accelerator`. The selected entry controls accelerator allocation, per-node GPU

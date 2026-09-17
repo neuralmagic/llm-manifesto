@@ -198,6 +198,20 @@ class RoleSpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_role_configuration(self) -> "RoleSpec":
+        model_arg_names = {"revision"}
+        configured_model_args = model_arg_names.intersection(self.vllm_args)
+        computed_model_args = model_arg_names.intersection(self.computed.get("vllm", {}))
+        raw_model_args = [
+            arg
+            for arg in self.vllm_raw_args
+            if re.match(r"^--revision(?:[= ]|$)", arg)
+        ]
+        if configured_model_args or computed_model_args or raw_model_args:
+            raise ValueError(
+                f"{self.name}: configure the model revision with model.revision, "
+                "not a revision vLLM argument"
+            )
+
         pp_arg_names = {"pipeline_parallel_size", "pipeline-parallel-size"}
         configured_pp_args = pp_arg_names.intersection(self.vllm_args)
         computed_pp_args = pp_arg_names.intersection(self.computed.get("vllm", {}))
@@ -217,9 +231,12 @@ class RoleSpec(BaseModel):
 
 
 class ModelSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: str
     label: str | None = None
     image: str
+    revision: str | None = None
     served_name: str | None = None
     hf_home: str | None = None
 

@@ -124,6 +124,37 @@ def test_pipeline_parallel_vllm_arg_requires_typed_parallelism(role):
         DeploymentSpec.model_validate(_spec_with_role(role))
 
 
+@pytest.mark.parametrize(
+    "role",
+    [
+        {"name": "decode", "vllm": {"revision": "abc123"}},
+        {"name": "decode", "computed": {"vllm": {"revision": "abc123"}}},
+        {"name": "decode", "vllm_raw_args": ["--revision=abc123"]},
+        {"name": "decode", "vllm_raw_args": ["--revision abc123"]},
+    ],
+)
+def test_revision_vllm_arg_requires_model_revision(role):
+    with pytest.raises(ValidationError, match="model.revision"):
+        DeploymentSpec.model_validate(_spec_with_role(role))
+
+
+def test_model_revision_is_typed_model_identity():
+    data = _spec_with_role({"name": "decode"})
+    data["model"]["revision"] = "abc123"
+
+    spec = DeploymentSpec.model_validate(data)
+
+    assert spec.model.revision == "abc123"
+
+
+def test_unknown_model_field_is_rejected():
+    data = _spec_with_role({"name": "decode"})
+    data["model"]["revison"] = "abc123"
+
+    with pytest.raises(ValidationError, match="revison"):
+        DeploymentSpec.model_validate(data)
+
+
 def test_derived_gpus_must_partition_model_parallel_groups():
     role = _role(
         {
