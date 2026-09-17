@@ -713,6 +713,13 @@ cache:
   key: dev-build-42
 ```
 
+For Deployment model pods, writable JIT caches live on a size-limited pod
+`emptyDir` (using the role's `ephemeral_storage` value, or 32Gi by default).
+They survive container restarts and disappear when Kubernetes removes the pod,
+so rollouts do not leave old cache directories on the persistent filesystem.
+The Hugging Face model cache remains on the configured shared or host volume.
+LeaderWorkerSet roles continue using the configured persistent JIT cache paths.
+
 When persistent cache storage is configured, model pods clear their JIT and
 compilation caches after a failed process exit, or when the same container
 restarts after terminating without running its exit handler. Stateless pods

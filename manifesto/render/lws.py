@@ -16,7 +16,7 @@ from ..features import Feature, WorkloadKind
 from ..instance import Instance
 from ..launch import build_launch_script
 from ..parallelism import parallel_layout
-from ..resolve import resolve_role
+from ..resolve import POD_CACHE_MOUNT, resolve_role
 from ..spec import DeploymentSpec, RoleSpec
 from ..workload import (
     KUEUE_QUEUE_LABEL as KUEUE_QUEUE_LABEL,
@@ -46,6 +46,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
     cross_node_model_parallel = layout.cross_node_model_parallel
     distributed_dp = layout.distributed_dp
     workload_name = role_workload_name(instance, role)
+    pod_cache = resolved.persistent_cache and resolved.features.workload_kind == WorkloadKind.DEPLOYMENT
 
     containers, extra_volumes = sidecars(
         spec.runtime.sidecars,
@@ -53,6 +54,13 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
         dcgm_config_name=instance.name("dcgm-metrics"),
     )
     volumes = cluster.base_volumes()
+    if pod_cache:
+        volumes.append(
+            {
+                "name": "pod-jit-cache",
+                "emptyDir": {"sizeLimit": role.resources.ephemeral_storage or "32Gi"},
+            }
+        )
     if role.shm_size:
         volumes[0]["emptyDir"]["sizeLimit"] = role.shm_size
     volumes.extend(extra_volumes)
@@ -141,7 +149,10 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
             "requests": vllm_requests,
             "limits": vllm_limits,
         },
-        "volumeMounts": cluster.volume_mounts(),
+        "volumeMounts": [
+            *cluster.volume_mounts(),
+            *([{"name": "pod-jit-cache", "mountPath": POD_CACHE_MOUNT}] if pod_cache else []),
+        ],
     }
     if cluster.pod_defaults.image_pull_policy:
         vllm_container["imagePullPolicy"] = cluster.pod_defaults.image_pull_policy
