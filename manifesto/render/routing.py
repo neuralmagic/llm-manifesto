@@ -8,7 +8,6 @@ import yaml
 
 from ..cluster import Cluster
 from ..instance import Instance
-from ..parallelism import parallel_layout
 from ..resolve import resolve_role
 from ..spec import DeploymentSpec, RoutingFrontend, RoutingKind, RoutingSpec
 
@@ -296,7 +295,7 @@ def _filter_api_servers(
     ]
     if not profiles:
         raise ValueError(
-            f"cross-node model parallel routing requires a {profile_name} scheduling profile"
+            f"API endpoint filtering requires a {profile_name} scheduling profile"
         )
     for profile in profiles:
         profile_plugins = profile.setdefault("plugins", [])
@@ -350,6 +349,8 @@ def _plugins_config_file(routing: RoutingSpec) -> str:
 def _profile_worker_indices(
     spec: DeploymentSpec,
     target_role: str,
+    instance: Instance,
+    cluster: Cluster,
 ) -> dict[str, tuple[int, ...]]:
     profile_roles = (
         {"prefill": "prefill", "decode": "decode"}
@@ -358,9 +359,9 @@ def _profile_worker_indices(
     )
     result: dict[str, tuple[int, ...]] = {}
     for profile_name, role_name in profile_roles.items():
-        layout = parallel_layout(spec.role(role_name))
-        if layout.cross_node_model_parallel:
-            result[profile_name] = layout.serving_worker_indices
+        resolved = resolve_role(spec, instance, cluster, spec.role(role_name))
+        if len(resolved.api_nodes) < resolved.layout.node_count:
+            result[profile_name] = resolved.api_nodes
     return result
 
 
@@ -380,7 +381,7 @@ def render_routing(spec: DeploymentSpec, instance: Instance, cluster: Cluster) -
     epp_role_name = instance.name("infpool-epp-rbac")
     plugin_configs = _plugin_configs(
         spec.routing,
-        profile_worker_indices=_profile_worker_indices(spec, target_role),
+        profile_worker_indices=_profile_worker_indices(spec, target_role, instance, cluster),
     )
     plugins_config_file = _plugins_config_file(spec.routing)
     standalone = spec.routing.frontend == RoutingFrontend.STANDALONE

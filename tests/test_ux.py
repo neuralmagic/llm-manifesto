@@ -130,7 +130,7 @@ def test_equations_get_explicit_dp_scopes():
     assert resolved.env["DP_WORLD"] == "8"
 
 
-def test_equations_get_pipeline_and_model_parallel_scopes():
+def test_equations_expose_dp_placement_and_preserve_legacy_names():
     spec = load_spec(ROOT / "models" / "qwen" / "aggregated.yaml", CLUSTER)
     role = spec.role("decode")
     role.parallelism.tp = 2
@@ -138,6 +138,8 @@ def test_equations_get_pipeline_and_model_parallel_scopes():
     role.resources.gpus = 4
     role.computed["env"] = {
         "PP_WORLD": "pp_world_size",
+        "RANK_GPUS": "gpus_per_dp_rank",
+        "RANK_NODES": "nodes_per_dp_rank",
         "MODEL_PARALLEL_LOCAL": "model_parallel_local_size",
         "MODEL_PARALLEL_WORLD": "model_parallel_world_size",
     }
@@ -145,6 +147,8 @@ def test_equations_get_pipeline_and_model_parallel_scopes():
     resolved = resolve_role(spec, Instance("tester", spec.release), CLUSTER, role)
 
     assert resolved.env["PP_WORLD"] == "2"
+    assert resolved.env["RANK_GPUS"] == "4"
+    assert resolved.env["RANK_NODES"] == "1"
     assert resolved.env["MODEL_PARALLEL_LOCAL"] == "4"
     assert resolved.env["MODEL_PARALLEL_WORLD"] == "4"
 

@@ -6,8 +6,7 @@ import json
 import shlex
 from typing import Any
 
-from .dp_ports import RolePorts
-from .parallelism import parallel_layout
+from .resolve import ResolvedRole
 from .spec import DeploymentSpec, RoleSpec
 
 
@@ -51,22 +50,19 @@ def _command_lines(parts: list[str | list[str]], *, indent: str = "") -> list[st
 def build_launch_script(
     spec: DeploymentSpec,
     role: RoleSpec,
-    ports: RolePorts,
+    resolved: ResolvedRole,
     *,
-    log_dir: str | None,
-    trace_dir: str | None = None,
-    vllm_env: str | None,
-    persistent_cache: bool = False,
-    vllm_args: dict[str, Any] | None = None,
-    external_dp: bool = False,
-    multi_port_external_dp: bool = False,
-    distributed_dp: bool = False,
-    vllm_raw_args: list[str] | None = None,
     respect_visible_devices: bool = False,
 ) -> str:
-    layout = parallel_layout(role)
-    internal_dp = role.parallelism.dp_enabled and not external_dp
-    headless_workers = layout.cross_node_model_parallel or (internal_dp and role.lws.size > 1)
+    layout = resolved.layout
+    ports = resolved.ports
+    log_dir = resolved.log_dir
+    trace_dir = resolved.trace_dir
+    vllm_env = resolved.vllm_env
+    persistent_cache = resolved.persistent_cache
+    external_dp = resolved.features.external_dp
+    multi_port_external_dp = external_dp and ports.rank_count > 1
+    headless_workers = len(resolved.api_nodes) < layout.node_count
     cleanup_cache = persistent_cache and spec.cache.cleanup_on_crash
     lines = ["set -euo pipefail"]
     if persistent_cache:
@@ -198,25 +194,26 @@ def build_launch_script(
             f"DP_SIZE_LOCAL={layout.dp_local_size}",
             f"DP_SIZE={layout.dp_world_size}",
         ]
-        if not distributed_dp and role.lws.size > 1:
-            lines.append("START_RANK=$(( LWS_WORKER_INDEX * DP_SIZE_LOCAL ))")
-        elif not distributed_dp:
-            lines.append("START_RANK=0")
+        if layout.nodes_per_dp_rank == 1:
+            lines.append(
+                "START_RANK=$(( LWS_WORKER_INDEX * DP_SIZE_LOCAL ))"
+                if layout.node_count > 1 else "START_RANK=0"
+            )
     if headless_workers:
-        lines += ["HEADLESS_ARGS=()"]
-        if distributed_dp and external_dp:
-            lines += [
-                f"MODEL_PARALLEL_NODES={layout.model_parallel_node_count}",
-                'if (( LWS_WORKER_INDEX % MODEL_PARALLEL_NODES != 0 )); then',
-            ]
-        else:
-            lines.append('if [ "$LWS_WORKER_INDEX" -gt 0 ]; then')
-        lines.append("  HEADLESS_ARGS=(--headless)")
-        if internal_dp and not layout.cross_node_model_parallel:
-            # Passing start-rank on the API node makes vLLM infer hybrid LB.
-            # Only headless nodes need an explicit starting DP rank.
-            lines.append('  HEADLESS_ARGS+=(--data-parallel-start-rank "$START_RANK")')
-        lines.append("fi")
+        api_pattern = "|".join(str(node) for node in resolved.api_nodes)
+        lines += [
+            "HEADLESS_ARGS=()",
+            'case "$LWS_WORKER_INDEX" in',
+            f"  {api_pattern}) ;;",
+            "  *)",
+            "    HEADLESS_ARGS=(--headless)",
+        ]
+        if layout.nodes_per_dp_rank == 1:
+            # vLLM infers ranks from --node-rank when a DP rank spans nodes.
+            # Otherwise only headless nodes need start-rank; on an API node
+            # this option would switch vLLM to hybrid load balancing.
+            lines.append('    HEADLESS_ARGS+=(--data-parallel-start-rank "$START_RANK")')
+        lines += ["    ;;", "esac"]
 
     base_args: list[str | list[str]] = [
         "vllm",
@@ -228,11 +225,11 @@ def build_launch_script(
     if layout.pp_world_size > 1:
         base_args.append(["--pipeline-parallel-size", str(layout.pp_world_size)])
     if not role.parallelism.dp_enabled and not respect_visible_devices:
-        device_ids = ",".join(str(index) for index in range(layout.model_parallel_local_size))
+        device_ids = ",".join(str(index) for index in range(layout.gpus_per_node))
         base_args[3:3] = [["--device-ids", device_ids]]
     if role.parallelism.ep:
         base_args.append("--enable-expert-parallel")
-    if layout.cross_node_model_parallel:
+    if layout.nodes_per_dp_rank > 1:
         base_args += [
             ["--nnodes", str(role.lws.size)],
             ["--node-rank", "$LWS_WORKER_INDEX"],
@@ -240,46 +237,35 @@ def build_launch_script(
         ]
     if headless_workers:
         base_args.append('${HEADLESS_ARGS[@]+"${HEADLESS_ARGS[@]}"}')
-    if distributed_dp:
-        base_args += [
-            ["--data-parallel-size", "$DP_SIZE"],
-            ["--data-parallel-size-local", "1"],
-            ["--data-parallel-address", '"${LWS_LEADER_ADDRESS}"'],
-            ["--data-parallel-rpc-port", "5555"],
-        ]
-        if external_dp:
-            base_args.append("--data-parallel-external-lb")
-    elif multi_port_external_dp:
-        dp_address = "${LWS_LEADER_ADDRESS}" if role.lws.size > 1 else "127.0.0.1"
-        base_args += [
-            ["--data-parallel-size", "$DP_SIZE"],
-            ["--data-parallel-start-rank", "$START_RANK"],
-            ["--data-parallel-size-local", "$DP_SIZE_LOCAL"],
-            ["--data-parallel-address", dp_address],
-            ["--data-parallel-rpc-port", "5555"],
-            "--data-parallel-multi-port-external-lb",
-            ["--data-parallel-supervisor-port", "8100"],
-        ]
-    elif role.parallelism.dp_enabled:
-        dp_address = "${LWS_LEADER_ADDRESS}" if role.lws.size > 1 else "127.0.0.1"
+    if role.parallelism.dp_enabled:
+        dp_address = '"${LWS_LEADER_ADDRESS}"' if layout.node_count > 1 else "127.0.0.1"
         base_args += [
             ["--data-parallel-size", "$DP_SIZE"],
             ["--data-parallel-size-local", "$DP_SIZE_LOCAL"],
             ["--data-parallel-address", dp_address],
             ["--data-parallel-rpc-port", "5555"],
         ]
-        if external_dp:
-            base_args.append(["--data-parallel-rank", "$START_RANK"])
+        if multi_port_external_dp:
+            base_args += [
+                ["--data-parallel-start-rank", "$START_RANK"],
+                "--data-parallel-multi-port-external-lb",
+                ["--data-parallel-supervisor-port", "8100"],
+            ]
+        elif external_dp:
+            if layout.nodes_per_dp_rank > 1:
+                base_args.append("--data-parallel-external-lb")
+            else:
+                base_args.append(["--data-parallel-rank", "$START_RANK"])
     if role.kv_transfer_config:
         base_args.append(["--kv_transfer_config", shlex.quote(json.dumps(role.kv_transfer_config, separators=(",", ":")))])
     if spec.model.revision:
         base_args.append(["--revision", shlex.quote(spec.model.revision)])
     if spec.model.served_name:
         base_args.append(["--served-model-name", shlex.quote(spec.model.served_name)])
-    for name, value in (vllm_args or role.vllm_args).items():
+    for name, value in resolved.vllm_args.items():
         if arg := _format_arg(name, value):
             base_args.append(arg)
-    base_args.extend(vllm_raw_args if vllm_raw_args is not None else role.vllm_raw_args)
+    base_args.extend(resolved.vllm_raw_args)
 
     if lines[-1]:
         lines.append("")

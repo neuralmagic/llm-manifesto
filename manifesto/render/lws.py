@@ -15,7 +15,6 @@ from ..dra import (
 from ..features import Feature, WorkloadKind
 from ..instance import Instance
 from ..launch import build_launch_script
-from ..parallelism import parallel_layout
 from ..resolve import POD_CACHE_MOUNT, resolve_role
 from ..spec import DeploymentSpec, RoleSpec
 from ..workload import (
@@ -42,10 +41,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
     accelerator = spec.accelerator_config(cluster)
     external_dp = resolved.features.external_dp
     multi_port_external_dp = external_dp and resolved.ports.rank_count > 1
-    layout = parallel_layout(role)
-    cross_node_model_parallel = layout.cross_node_model_parallel
-    distributed_dp = layout.distributed_dp
-    internal_multinode_dp = role.parallelism.dp_enabled and not external_dp and role.lws.size > 1
+    layout = resolved.layout
     workload_name = role_workload_name(instance, role)
     pod_cache = resolved.persistent_cache and resolved.features.workload_kind == WorkloadKind.DEPLOYMENT
 
@@ -72,7 +68,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
     ]
     if multi_port_external_dp:
         container_ports.insert(0, {"containerPort": 8100, "name": "dp-supervisor"})
-    if distributed_dp or internal_multinode_dp:
+    if role.parallelism.dp_enabled and layout.node_count > 1:
         container_ports.append({"containerPort": 5555, "name": "dp-rpc"})
     readiness_ports = resolved.ports.public if resolved.features.routing_proxy else resolved.ports.backend
 
@@ -129,20 +125,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
         "image": spec.model.image,
         "command": ["/bin/bash", "-c"],
         "args": [
-            build_launch_script(
-                spec,
-                role,
-                resolved.ports,
-                log_dir=resolved.log_dir,
-                trace_dir=resolved.trace_dir,
-                vllm_env=resolved.vllm_env,
-                persistent_cache=resolved.persistent_cache,
-                vllm_args=resolved.vllm_args,
-                external_dp=external_dp,
-                multi_port_external_dp=multi_port_external_dp,
-                distributed_dp=distributed_dp,
-                vllm_raw_args=resolved.vllm_raw_args,
-            )
+            build_launch_script(spec, role, resolved)
         ],
         "env": container_env,
         "ports": container_ports,
@@ -166,52 +149,27 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
             vllm_container["resources"][resource_kind]["ephemeral-storage"] = (
                 role.resources.ephemeral_storage
             )
-    if cross_node_model_parallel or internal_multinode_dp:
-        leader_readiness = " && ".join(
+    if len(resolved.api_nodes) == layout.node_count and len(readiness_ports) == 1:
+        readiness_action = {
+            "httpGet": {"path": "/v1/models", "port": readiness_ports[0]},
+        }
+    else:
+        readiness_command = " && ".join(
             f"curl -sf http://localhost:{port}/v1/models | grep -q '\"id\"'"
             for port in readiness_ports
         )
-        if distributed_dp and external_dp:
-            readiness_guard = (
-                f"if (( ${{LWS_WORKER_INDEX:-0}} % {layout.model_parallel_node_count} != 0 )); "
-                "then exit 0; fi"
+        if len(resolved.api_nodes) < layout.node_count:
+            api_pattern = "|".join(str(node) for node in resolved.api_nodes)
+            readiness_command = (
+                f'case "${{LWS_WORKER_INDEX:-0}}" in {api_pattern}) ;; *) exit 0 ;; esac; '
+                + readiness_command
             )
-        else:
-            readiness_guard = (
-                'if [ "${LWS_WORKER_INDEX:-0}" -gt 0 ]; then exit 0; fi'
-            )
-        vllm_container["readinessProbe"] = {
-            "exec": {
-                "command": [
-                    "/bin/bash",
-                    "-c",
-                    f"{readiness_guard}; {leader_readiness}",
-                ]
-            },
-            "periodSeconds": 5,
-            "failureThreshold": 120,
-        }
-    elif len(readiness_ports) == 1:
-        vllm_container["readinessProbe"] = {
-            "httpGet": {"path": "/v1/models", "port": readiness_ports[0]},
-            "periodSeconds": 5,
-            "failureThreshold": 120,
-        }
-    else:
-        vllm_container["readinessProbe"] = {
-            "exec": {
-                "command": [
-                    "/bin/bash",
-                    "-c",
-                    " && ".join(
-                        f"curl -sf http://localhost:{port}/v1/models | grep -q '\"id\"'"
-                        for port in readiness_ports
-                    ),
-                ]
-            },
-            "periodSeconds": 5,
-            "failureThreshold": 120,
-        }
+        readiness_action = {"exec": {"command": ["/bin/bash", "-c", readiness_command]}}
+    vllm_container["readinessProbe"] = {
+        **readiness_action,
+        "periodSeconds": 5,
+        "failureThreshold": 120,
+    }
     if multi_port_external_dp:
         vllm_container["startupProbe"] = {
             "httpGet": {"path": "/health", "port": "dp-supervisor"},

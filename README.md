@@ -237,7 +237,7 @@ with LeaderWorkerSet rather than Deployment. Multi-node roles cannot select
 Deployment.
 
 For example, this runs one TP2 × PP2 engine across four GPUs. Increase
-`lws.size` and divide those model-parallel GPUs evenly across pods to span
+`lws.size` and divide those four GPUs evenly across pods to span
 nodes; Manifesto renders the native vLLM node-rank and headless-worker flags.
 
 ```yaml
@@ -246,6 +246,13 @@ roles:
     lws: {size: 1}
     parallelism: {tp: 2, pp: 2, dp: false}
 ```
+
+Manifesto derives where DP ranks sit and which nodes host HTTP endpoints.
+Each DP rank uses `tp × pp` GPUs and either fits on one node or spans whole
+nodes. With internal DP load balancing, node 0 hosts the HTTP endpoint. With
+external DP load balancing, each DP rank exposes an endpoint on its first
+node. Launch scripts, readiness checks, routing, and idle shutdown use this
+same endpoint placement.
 
 Configure PP only through `parallelism.pp`. Manifesto rejects
 `pipeline_parallel_size` in `vllm:`, computed vLLM arguments, or

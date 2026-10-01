@@ -478,7 +478,7 @@ def test_dp_ports_feed_container_readiness_and_inferencepool():
     container = lws["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"]["containers"][0]
     infpool = _find(objects, "InferencePool")
 
-    assert [p["containerPort"] for p in container["ports"]] == [8100, 8200, 8201, 8202, 8203]
+    assert [p["containerPort"] for p in container["ports"]] == [8100, 8200, 8201, 8202, 8203, 5555]
     assert container["resources"]["requests"]["cpu"] == "14"
     assert container["resources"]["requests"]["memory"] == "256Gi"
     readiness = container["readinessProbe"]["exec"]["command"][-1]
@@ -890,7 +890,7 @@ def test_no_dp_qwen_uses_single_port_and_no_dp_flags():
     assert infpool["spec"]["targetPorts"] == [{"number": 8000}]
 
 
-def test_single_node_pipeline_parallelism_uses_all_model_parallel_gpus():
+def test_single_node_pipeline_parallelism_uses_all_tp_pp_gpus():
     spec = load_spec(ROOT / "models" / "qwen" / "aggregated.yaml", CLUSTER)
     role = spec.role("decode")
     role.parallelism.tp = 2
@@ -930,10 +930,10 @@ def test_cross_node_pipeline_parallelism_routes_only_to_group_leader():
     assert "--pipeline-parallel-size 2" in script
     assert "--nnodes 2" in script
     assert "--node-rank $LWS_WORKER_INDEX" in script
-    assert 'if [ "$LWS_WORKER_INDEX" -gt 0 ]; then' in script
+    assert 'case "$LWS_WORKER_INDEX" in\n  0) ;;' in script
 
     readiness = container["readinessProbe"]["exec"]["command"][-1]
-    assert 'if [ "${LWS_WORKER_INDEX:-0}" -gt 0 ]' in readiness
+    assert 'case "${LWS_WORKER_INDEX:-0}" in 0) ;;' in readiness
     service = _find(objects, "Service", "decode-svc")
     assert service["spec"]["selector"]["leaderworkerset.sigs.k8s.io/worker-index"] == "0"
 
@@ -1122,22 +1122,21 @@ def test_pd_dp2_tp8_decode_uses_two_routable_two_node_tp_groups():
     script = container["args"][0]
     assert "DP_SIZE_LOCAL=1" in script
     assert "DP_SIZE=2" in script
-    assert "MODEL_PARALLEL_NODES=2" in script
-    assert "LWS_WORKER_INDEX % MODEL_PARALLEL_NODES != 0" in script
+    assert 'case "$LWS_WORKER_INDEX" in\n  0|2) ;;' in script
     assert "LWS_GROUP_INDEX" not in script
     assert "--tensor-parallel-size 8" in script
     assert "--nnodes 4" in script
     assert "--node-rank $LWS_WORKER_INDEX" in script
     assert "--data-parallel-size $DP_SIZE" in script
     assert "--data-parallel-rank" not in script
-    assert "--data-parallel-size-local 1" in script
+    assert "--data-parallel-size-local $DP_SIZE_LOCAL" in script
     assert '--data-parallel-address "${LWS_LEADER_ADDRESS}"' in script
     assert "--data-parallel-rpc-port 5555" in script
     assert "--data-parallel-external-lb" in script
     assert "--data-parallel-multi-port-external-lb" not in script
 
     readiness = container["readinessProbe"]["exec"]["command"][-1]
-    assert "LWS_WORKER_INDEX:-0} % 2 != 0" in readiness
+    assert 'case "${LWS_WORKER_INDEX:-0}" in 0|2) ;;' in readiness
 
     service = _find(objects, "Service", "decode-svc")
     assert service["spec"]["selector"]["leaderworkerset.sigs.k8s.io/worker-index"] == "0"
@@ -1172,14 +1171,14 @@ def test_routing_disabled_dp2_tp8_uses_internal_vllm_load_balancing():
     assert "--nnodes 4" in script
     assert "--node-rank $LWS_WORKER_INDEX" in script
     assert "--data-parallel-size $DP_SIZE" in script
-    assert "--data-parallel-size-local 1" in script
+    assert "--data-parallel-size-local $DP_SIZE_LOCAL" in script
     assert "--data-parallel-external-lb" not in script
     assert "--data-parallel-rank" not in script
-    assert 'if [ "$LWS_WORKER_INDEX" -gt 0 ]; then' in script
+    assert 'case "$LWS_WORKER_INDEX" in\n  0) ;;' in script
     assert "LWS_WORKER_INDEX % TP_NODES" not in script
 
     readiness = container["readinessProbe"]["exec"]["command"][-1]
-    assert 'if [ "${LWS_WORKER_INDEX:-0}" -gt 0 ]' in readiness
+    assert 'case "${LWS_WORKER_INDEX:-0}" in 0) ;;' in readiness
     service = _find(objects, "Service", "decode-svc")
     assert service["spec"]["selector"]["leaderworkerset.sigs.k8s.io/worker-index"] == "0"
     assert not any(obj["kind"] == "InferencePool" for obj in objects)
@@ -1222,7 +1221,7 @@ def test_internal_dp_uses_one_coordinated_api_endpoint(nodes):
     if nodes > 1:
         assert service["spec"]["selector"]["leaderworkerset.sigs.k8s.io/worker-index"] == "0"
         readiness = container["readinessProbe"]["exec"]["command"][-1]
-        assert 'if [ "${LWS_WORKER_INDEX:-0}" -gt 0 ]' in readiness
+        assert 'case "${LWS_WORKER_INDEX:-0}" in 0) ;;' in readiness
         assert "localhost:8000" in readiness
     else:
         assert "LWS_" not in script
@@ -1234,6 +1233,101 @@ def test_internal_dp_uses_one_coordinated_api_endpoint(nodes):
         "ports": [8000], "worker_indices": ["0"] if nodes > 1 else None,
     }
     assert env["EXPECTED_TARGETS"]["value"] == "2"
+
+
+@pytest.mark.parametrize("routing", ["disabled", "load_aware"])
+@pytest.mark.parametrize(
+    ("tp", "pp", "dp", "nodes", "external_api_nodes", "external_ports"),
+    [
+        (2, 1, 2, 1, [0], 2),
+        (2, 1, 4, 2, [0, 1], 2),
+        (2, 1, 2, 2, [0, 1], 1),
+        (8, 1, False, 2, [0], 1),
+        (8, 1, 2, 4, [0, 2], 1),
+        (1, 2, 2, 4, [0, 2], 1),
+        (2, 2, False, 1, [0], 1),
+        (2, 2, 2, 4, [0, 2], 1),
+    ],
+)
+def test_api_placement_agrees_with_launch_probes_and_routing(
+    tmp_path, routing, tp, pp, dp, nodes, external_api_nodes, external_ports
+):
+    """Execute each node's launch and probe; compare with routing and metrics."""
+    cluster = _stateless_cluster()
+    spec = load_spec(ROOT / "models" / "qwen" / "qwen3-0.6b.yaml", cluster)
+    spec.routing.kind = routing
+    role = spec.role("decode")
+    role.parallelism.tp = tp
+    role.parallelism.pp = pp
+    role.parallelism.dp = dp
+    role.lws.size = nodes
+    role.lws.replicas = 2
+    role.resources.gpus = role.gpus_per_pod
+    api_nodes = external_api_nodes if routing == "load_aware" else [0]
+    port_count = external_ports if routing == "load_aware" else 1
+
+    objects = render(spec, user="tester", cluster=cluster)
+    if nodes == 1:
+        workload = _find(objects, "Deployment", "decode")
+        container = workload["spec"]["template"]["spec"]["containers"][0]
+    else:
+        workload = _find(objects, "LeaderWorkerSet", "decode")
+        container = workload["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"]["containers"][0]
+    for name, body in {
+        "vllm": 'printf "%s\\n" "$@" > "$CAPTURE_ARGS"',
+        "curl": 'echo "$*" >> "$CAPTURE_PROBES"; [ "${FAIL_PROBE:-0}" = 0 ] || exit 1; echo \'{"id":"test"}\'',
+    }.items():
+        executable = tmp_path / name
+        executable.write_text("#!/bin/bash\n" + body + "\n")
+        executable.chmod(0o755)
+
+    actual_api_nodes = []
+    for node in range(nodes):
+        capture_args = tmp_path / f"args-{node}"
+        capture_probes = tmp_path / f"probes-{node}"
+        env = dict(
+            os.environ,
+            PATH=f"{tmp_path}:{os.environ['PATH']}",
+            LWS_WORKER_INDEX=str(node),
+            LWS_LEADER_ADDRESS="node0",
+            CAPTURE_ARGS=str(capture_args),
+            CAPTURE_PROBES=str(capture_probes),
+        )
+        subprocess.run(["bash", "-c", container["args"][0]], env=env, check=True, capture_output=True)
+        args = capture_args.read_text().splitlines()
+        if "--headless" not in args:
+            actual_api_nodes.append(node)
+        probe = container["readinessProbe"]
+        if "exec" in probe:
+            subprocess.run(probe["exec"]["command"], env=env, check=True, capture_output=True)
+            assert capture_probes.exists() == (node in api_nodes)
+            if node in api_nodes:
+                assert len(capture_probes.read_text().splitlines()) == port_count
+            # A failed HTTP check must fail readiness only on nodes serving HTTP.
+            failed = subprocess.run(
+                probe["exec"]["command"], env=env | {"FAIL_PROBE": "1"}, capture_output=True
+            )
+            assert (failed.returncode != 0) == (node in api_nodes)
+        else:
+            assert node in api_nodes
+            assert port_count == 1
+    assert actual_api_nodes == api_nodes
+
+    controller = _find(objects, "Deployment", "idle-shutdown")
+    env = {item["name"]: item["value"] for item in _container(controller, "idle-shutdown")["env"] if "value" in item}
+    targets = json.loads(env["TARGETS"])["decode"]
+    assert targets["ports"] == list(range(8000, 8000 + port_count))
+    assert targets["worker_indices"] == (
+        [str(node) for node in api_nodes] if len(api_nodes) < nodes else None
+    )
+    assert int(env["EXPECTED_TARGETS"]) == 2 * len(api_nodes) * port_count
+    if routing == "load_aware":
+        config = yaml.safe_load(_find(objects, "ConfigMap", "epp-config")["data"]["plugins.yaml"])
+        filters = [p for p in config["plugins"] if p.get("name") == "manifesto-default-api-server-filter"]
+        if len(api_nodes) < nodes:
+            assert filters[0]["parameters"]["validValues"] == [str(node) for node in api_nodes]
+        else:
+            assert filters == []
 
 
 def test_cross_node_tp_custom_epp_render_is_repeatable_and_non_mutating():

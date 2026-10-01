@@ -65,7 +65,7 @@ def test_kimi_k3_aggregated_wide_ep_shape_and_backends():
     assert decode.parallelism.tp == 16
     assert decode.parallelism.dp_enabled is False
     assert parallel_layout(decode).tp_local_size == 4
-    assert parallel_layout(decode).cross_node_tp is True
+    assert parallel_layout(decode).nodes_per_dp_rank == 4
     assert parallel_layout(decode).dp_local_size == 1
     assert "decode_context_parallel_size" not in decode.vllm_args
 
@@ -119,7 +119,7 @@ def test_kimi_k3_rendered_pods_request_full_gb200_nodes():
 
     readiness = container["readinessProbe"]["exec"]["command"][-1]
     assert '${LWS_WORKER_INDEX:-0}' in readiness
-    assert "then exit 0" in readiness
+    assert "*) exit 0 ;;" in readiness
 
     service = next(obj for obj in objects if obj["kind"] == "Service" and obj["metadata"]["name"].endswith("decode-svc"))
     assert service["spec"]["selector"]["leaderworkerset.sigs.k8s.io/worker-index"] == "0"
@@ -176,7 +176,7 @@ def test_kimi_k3_pd_dp4_tp4_shape():
     assert prefill.lws.size == 4
     assert prefill.parallelism.tp == 4
     assert prefill.parallelism.dp_size == 4
-    assert prefill_layout.cross_node_tp is False
+    assert prefill_layout.nodes_per_dp_rank == 1
     assert prefill_layout.tp_local_size == 4
     assert prefill_layout.dp_local_size == 1
     # TRTLLM-GEN MoE is unusable here: it has no batched-GEMM kernel for this
@@ -190,7 +190,7 @@ def test_kimi_k3_pd_dp4_tp4_shape():
     assert decode.lws.size == 4
     assert decode.parallelism.tp == 4
     assert decode.parallelism.dp_size == 4
-    assert decode_layout.cross_node_tp is False
+    assert decode_layout.nodes_per_dp_rank == 1
     assert decode_layout.dp_local_size == 1
     assert decode.vllm_args["moe_backend"] == "auto"
     assert decode.vllm_args["max_num_seqs"] == 32

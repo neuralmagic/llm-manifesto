@@ -209,7 +209,7 @@ with open(os.environ["CAPTURE"], "a") as stream:
     assert len(records) == nodes
     for rank, record in enumerate(records):
         args, actual = record["args"], record["env"]
-        if layout.cross_node_model_parallel:
+        if layout.nodes_per_dp_rank > 1:
             assert args[args.index("--node-rank") + 1] == str(rank)
             assert args[args.index("--master-addr") + 1] == "node01"
         else:
@@ -219,7 +219,7 @@ with open(os.environ["CAPTURE"], "a") as stream:
             assert args[args.index("--data-parallel-size-local") + 1] == str(layout.dp_local_size)
             assert args[args.index("--data-parallel-address") + 1] == ("node01" if nodes > 1 else "127.0.0.1")
             assert args[args.index("--data-parallel-rpc-port") + 1] == "5555"
-            if rank > 0 and not layout.distributed_dp:
+            if rank > 0 and layout.nodes_per_dp_rank == 1:
                 assert args[args.index("--data-parallel-start-rank") + 1] == str(rank * layout.dp_local_size)
             else:
                 # start-rank on the API node would enable hybrid LB in vLLM.

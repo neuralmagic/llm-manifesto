@@ -15,7 +15,6 @@ from decimal import Decimal, ROUND_CEILING
 from .cluster import Cluster
 from .instance import Instance
 from .launch import build_launch_script
-from .parallelism import parallel_layout
 from .resolve import POD_CACHE_DIRS, resolve_role
 from .spec import DeploymentSpec, RoutingKind, TopologyKind
 
@@ -99,7 +98,6 @@ def render_slurm(
     settings = cluster.slurm
     assert settings is not None
     role = spec.roles[0]
-    layout = parallel_layout(role)
     instance = Instance(user, spec.release, include_user_in_name=cluster.naming.user_prefix)
     resolved = resolve_role(spec, instance, cluster, role)
     allocation = spec.accelerator_config(cluster).allocation.slurm
@@ -146,17 +144,7 @@ def render_slurm(
     if resolved.persistent_cache:
         for key in POD_CACHE_DIRS:
             launch.append(f'export {key}="${{{key}}}/${{MANIFESTO_POD_UID}}"')
-    launch.append(build_launch_script(
-        spec, role, resolved.ports,
-        log_dir=resolved.log_dir,
-        trace_dir=resolved.trace_dir,
-        vllm_env=resolved.vllm_env,
-        persistent_cache=resolved.persistent_cache,
-        vllm_args=resolved.vllm_args,
-        distributed_dp=layout.distributed_dp,
-        respect_visible_devices=True,
-        vllm_raw_args=resolved.vllm_raw_args,
-    ))
+    launch.append(build_launch_script(spec, role, resolved, respect_visible_devices=True))
     task = [
         "set -euo pipefail",
         'export LWS_WORKER_INDEX="$SLURM_PROCID"',

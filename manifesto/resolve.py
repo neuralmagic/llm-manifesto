@@ -35,6 +35,7 @@ POD_CACHE_DIRS = {
 
 @dataclass(frozen=True)
 class ResolvedRole:
+    layout: ParallelLayout
     ports: RolePorts
     log_dir: str | None
     trace_dir: str | None
@@ -47,6 +48,17 @@ class ResolvedRole:
     features: FeaturePlan
     vllm_raw_args: list[str]
     resource_claims: list[dict[str, str]]
+
+    @property
+    def api_nodes(self) -> tuple[int, ...]:
+        """Nodes hosting HTTP endpoints within one serving replica.
+
+        Internal load balancing has one entrypoint. External load balancing
+        exposes each DP rank on the first node holding its TP/PP workers.
+        """
+        if self.features.external_dp:
+            return tuple(range(0, self.layout.node_count, self.layout.nodes_per_dp_rank))
+        return (0,)
 
 
 def resolve_role(spec: DeploymentSpec, instance: Instance, cluster: Cluster, role: RoleSpec) -> ResolvedRole:
@@ -149,6 +161,7 @@ def resolve_role(spec: DeploymentSpec, instance: Instance, cluster: Cluster, rol
             env_provenance[name] = "manifesto:pod cache"
 
     return ResolvedRole(
+        layout=layout,
         ports=ports,
         log_dir=log_dir,
         trace_dir=trace_dir,
@@ -180,8 +193,11 @@ def _variable_context(spec: DeploymentSpec, role: RoleSpec, layout: ParallelLayo
         "tp_local_size": layout.tp_local_size,
         "pp": layout.pp_world_size,
         "pp_world_size": layout.pp_world_size,
-        "model_parallel_local_size": layout.model_parallel_local_size,
-        "model_parallel_world_size": layout.model_parallel_world_size,
+        "gpus_per_dp_rank": layout.gpus_per_dp_rank,
+        "nodes_per_dp_rank": layout.nodes_per_dp_rank,
+        # Retain existing equation names for compatibility with saved specs.
+        "model_parallel_local_size": min(layout.gpus_per_dp_rank, layout.gpus_per_node),
+        "model_parallel_world_size": layout.gpus_per_dp_rank,
         "dp_enabled": role.parallelism.dp_enabled,
         "dp_local_size": layout.dp_local_size,
         "dp_world_size": layout.dp_world_size,

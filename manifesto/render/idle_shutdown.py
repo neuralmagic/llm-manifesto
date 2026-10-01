@@ -9,7 +9,6 @@ from ..cluster import Cluster
 from ..features import WorkloadKind
 from ..images import DEFAULT_IMAGES
 from ..instance import Instance
-from ..parallelism import parallel_layout
 from ..resolve import resolve_role
 from ..spec import DeploymentSpec, RoutingFrontend, RoutingKind
 from .routing import gateway_name
@@ -241,34 +240,16 @@ def render_idle_shutdown(
             else instance.name(role.name)
         )
         resolved = resolve_role(spec, instance, cluster, role)
-        layout = parallel_layout(role)
-        headless_workers = layout.cross_node_model_parallel or (
-            role.parallelism.dp_enabled
-            and not resolved.features.external_dp
-            and role.lws.size > 1
-        )
-        serving_worker_indices = (
-            layout.serving_worker_indices
-            if layout.cross_node_model_parallel and resolved.features.external_dp
-            else (0,)
-        )
         targets[instance.labels(role=role.name)["llm-d.ai/role"]] = {
             "ports": list(resolved.ports.backend),
             "worker_indices": (
-                [str(index) for index in serving_worker_indices]
-                if headless_workers
+                [str(node) for node in resolved.api_nodes]
+                if len(resolved.api_nodes) < resolved.layout.node_count
                 else None
             ),
         }
-        serving_pods_per_replica = (
-            len(serving_worker_indices)
-            if headless_workers
-            else role.lws.size
-        )
         expected_targets += (
-            role.lws.replicas
-            * serving_pods_per_replica
-            * len(resolved.ports.backend)
+            role.lws.replicas * len(resolved.api_nodes) * len(resolved.ports.backend)
         )
         if resolved.features.workload_kind == WorkloadKind.DEPLOYMENT:
             deployment_names.append(workload_name)

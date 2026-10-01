@@ -12,7 +12,6 @@ from .lws import render_accelerator_claim_template, render_workload
 from .routing import render_routing
 from ..cluster import Cluster
 from ..instance import Instance
-from ..parallelism import parallel_layout
 from ..resolve import resolve_role
 from ..spec import DeploymentSpec
 
@@ -79,14 +78,10 @@ def render(
                 instance,
                 role.name,
                 resolved.ports,
-                leader_only=(
-                    parallel_layout(role).cross_node_model_parallel
-                    or (
-                        role.parallelism.dp_enabled
-                        and not resolved.features.external_dp
-                        and role.lws.size > 1
-                    )
-                ),
+                # A Service selector cannot express a list of worker indices.
+                # Use the leader when some nodes are headless; EPP can route to
+                # every API node using its endpoint filter.
+                leader_only=len(resolved.api_nodes) < resolved.layout.node_count,
             )
         )
     objects.extend(render_idle_shutdown(spec, instance, cluster))
