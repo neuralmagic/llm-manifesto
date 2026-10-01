@@ -848,7 +848,9 @@ Cluster accelerator allocation uses `slurm: {gres: gpu}` or a typed value such
 as `slurm: {gres: "gpu:nvidia_gr100"}`. Omit the count; Manifesto derives it.
 `slurm.partition`, `account`, `qos`, and `constraint` map to scheduler options.
 Jobs request exclusive nodes by default because vLLM binds host ports. If you
-disable `slurm.exclusive`, ensure concurrently running jobs use distinct ports.
+disable `slurm.exclusive` for direct serving, ensure concurrently running jobs
+use distinct ports. llm-d requires exclusive nodes because its router and P/D
+services use fixed host ports.
 
 ### llm-d routing and prefill/decode
 

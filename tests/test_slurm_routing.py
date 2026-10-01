@@ -9,7 +9,6 @@ import sys
 import time
 
 import pytest
-import yaml
 
 from manifesto.cluster import load_cluster
 from manifesto.instance import Instance
@@ -46,8 +45,8 @@ def test_pd_model_is_shared_by_backends(deployment):
 def test_file_discovery_preserves_policy(deployment):
     _, spec = deployment
     original = plugin_configs(spec.routing)
-    selected = yaml.safe_load(file_discovery_config(spec.routing, "/tmp/endpoints.json")["plugins.yaml"])
-    policy = yaml.safe_load(original["plugins.yaml"])
+    selected = file_discovery_config(spec.routing, "/tmp/endpoints.json")["plugins.yaml"]
+    policy = original["plugins.yaml"]
     assert selected["schedulingProfiles"] == policy["schedulingProfiles"]
     assert selected["plugins"][:-1] == policy["plugins"]
     assert selected["dataLayer"]["discovery"] == {"endpoints": {"pluginRef": "manifesto-file-discovery"}}
@@ -70,7 +69,7 @@ def test_inventory_contains_only_api_endpoints(tmp_path, deployment, tp, dp, nod
     env = dict(os.environ, MANIFESTO_ROUTER_DIR=str(tmp_path))
     for group in range(2):
         env[f"MANIFESTO_HOSTS_{group}"] = "\n".join(f"127.0.{group}.{i+1}" for i in range(nodes * 2))
-    subprocess.run([sys.executable, "-c", _prepare_config(spec, resolved, 8081)], env=env, check=True)
+    subprocess.run([sys.executable, "-c", _prepare_config(spec, instance, resolved, 8081)], env=env, check=True)
     endpoints = json.loads((tmp_path / "endpoints.json").read_text())["endpoints"]
     expected = {(r.name, f"127.0.{g}.{replica * nodes + worker + 1}", str(port))
                 for g, r in enumerate(spec.roles) for replica in range(2)
@@ -79,6 +78,14 @@ def test_inventory_contains_only_api_endpoints(tmp_path, deployment, tp, dp, nod
     assert actual == expected
     assert len({e["name"] for e in endpoints}) == len(endpoints)
     assert all(e["address"] != "" for e in endpoints)
+    for endpoint in endpoints:
+        labels = endpoint["labels"]
+        assert labels == instance.labels("model-server", labels["llm-d.ai/role"]) | {
+            "llm-d.ai/inferenceServing": "true",
+            "llm-d.ai/model": spec.model.label_value,
+            "llm-d.ai/deployment": "pd",
+            "leaderworkerset.sigs.k8s.io/worker-index": labels["leaderworkerset.sigs.k8s.io/worker-index"],
+        }
 
 
 # Fake Slurm launches real shell tasks concurrently. Container images are
@@ -219,6 +226,17 @@ def test_pd_routing_requires_pd_topology(deployment):
         render(spec, user="test", cluster=cluster)
 
 
+@pytest.mark.parametrize("model", ["qwen3-0.6b.yaml", "qwen3-0.6b-pd.yaml"])
+def test_routed_jobs_require_exclusive_nodes(deployment, model):
+    cluster, _ = deployment
+    cluster.slurm.exclusive = False
+    spec = load_spec(MODEL.with_name(model), cluster)
+    if spec.topology == "aggregated":
+        spec.routing.kind = "load_aware"
+    with pytest.raises(ValueError, match="requires slurm.exclusive: true"):
+        render(spec, user="test", cluster=cluster)
+
+
 @pytest.mark.parametrize("change, message", [
     (lambda s, c: setattr(s.roles[0], "kv_transfer_config", None), "NixlConnector"),
     (lambda s, c: setattr(s.routing, "replicas", 2), "one llm-d router"),
@@ -235,7 +253,7 @@ def test_unsupported_routed_config_is_rejected(deployment, change, message):
 
 def test_discovery_is_owned_by_backend(deployment):
     _, spec = deployment
-    spec.routing.plugin_config = yaml.safe_load(plugin_configs(spec.routing)["plugins.yaml"])
+    spec.routing.plugin_config = plugin_configs(spec.routing)["plugins.yaml"]
     spec.routing.plugin_config["dataLayer"] = {"discovery": {"endpoints": {"pluginRef": "kubernetes"}}}
     with pytest.raises(ValueError, match="backend owns endpoint discovery"):
         file_discovery_config(spec.routing, "/tmp/endpoints.json")

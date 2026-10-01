@@ -1478,6 +1478,7 @@ def test_epp_uses_dedicated_service_account_and_rbac():
     rules = {(tuple(rule["apiGroups"]), tuple(rule["resources"])): rule["verbs"] for rule in role["rules"]}
     assert rules[(("",), ("pods",))] == ["get", "list", "watch"]
     assert rules[(("inference.networking.k8s.io",), ("inferencepools",))] == ["get", "list", "watch"]
+    assert rules[(("llm-d.ai",), ("inferenceobjectives", "inferencemodelrewrites"))] == ["get", "list", "watch"]
     assert rules[
         (
             ("inference.networking.x-k8s.io",),

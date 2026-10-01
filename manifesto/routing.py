@@ -4,13 +4,22 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-import yaml
-
 from .cluster import Cluster
 from .dp_ports import RolePorts
-from .spec import RoutingKind, RoutingSpec
+from .instance import Instance
+from .spec import DeploymentSpec, RoleSpec, RoutingKind, RoutingSpec
 
 _LWS_WORKER_INDEX_LABEL = "leaderworkerset.sigs.k8s.io/worker-index"
+
+
+def serving_labels(spec: DeploymentSpec, instance: Instance, role: RoleSpec) -> dict[str, str]:
+    """Labels available to routing policies on either backend."""
+    return instance.labels("model-server", role.name) | {
+        "llm-d.ai/inferenceServing": "true",
+        "llm-d.ai/model": spec.model.label_value,
+        "llm-d.ai/deployment": spec.topology.value,
+    }
+
 
 ENVOY_CONFIG = """\
 admin:
@@ -264,7 +273,7 @@ def plugin_configs(
     routing: RoutingSpec,
     *,
     profile_worker_indices: dict[str, tuple[int, ...]] | None = None,
-) -> dict[str, str]:
+) -> dict[str, dict]:
     if routing.epp is not None and routing.epp.plugin_configs:
         source_configs = routing.epp.plugin_configs
     else:
@@ -279,15 +288,11 @@ def plugin_configs(
                 profile_name,
                 worker_indices,
             )
-    return {
-        name: yaml.safe_dump(config, sort_keys=False)
-        for name, config in configs.items()
-    }
+    return configs
 
 
 def plugins_config_file(routing: RoutingSpec) -> str:
     return routing.epp.plugins_config_file if routing.epp is not None else "plugins.yaml"
-
 
 
 def epp_image(routing: RoutingSpec, cluster: Cluster) -> str:

@@ -8,7 +8,6 @@ Kubernetes API is needed.
 
 from __future__ import annotations
 
-import json
 import shlex
 
 import yaml
@@ -16,17 +15,17 @@ import yaml
 from .cluster import Cluster
 from .instance import Instance
 from .resolve import ResolvedRole, resolve_role
-from .routing import ENVOY_CONFIG, epp_image, plugin_configs, plugins_config_file, proxy_args
-from .slurm import _script_variable, cpu_count, launch_task, memory_mib, step_command
+from .routing import ENVOY_CONFIG, epp_image, plugin_configs, plugins_config_file, proxy_args, serving_labels
+from .slurm import _script_variable, batch_directives, cpu_count, launch_task, memory_mib, step_command
 from .spec import DeploymentSpec, RoutingSpec
 
 
-def file_discovery_config(routing: RoutingSpec, endpoint_path: str) -> dict[str, str]:
+def file_discovery_config(routing: RoutingSpec, endpoint_path: str) -> dict[str, dict]:
     configs = plugin_configs(routing)
     if any(name in {".", ".."} for name in configs):
         raise ValueError("routing config names must be filenames")
     selected = plugins_config_file(routing)
-    config = yaml.safe_load(configs[selected])
+    config = configs[selected]
     plugins = config.setdefault("plugins", [])
     name = "manifesto-file-discovery"
     if any(plugin.get("name", plugin["type"]) == name for plugin in plugins):
@@ -37,19 +36,22 @@ def file_discovery_config(routing: RoutingSpec, endpoint_path: str) -> dict[str,
     plugins.append({"type": "file-discovery", "name": name,
                     "parameters": {"path": endpoint_path, "watchFile": False}})
     layer["discovery"] = {"endpoints": {"pluginRef": name}}
-    configs[selected] = yaml.safe_dump(config, sort_keys=False)
     return configs
 
 
-def _prepare_config(spec: DeploymentSpec, resolved: dict[str, ResolvedRole], port: int) -> str:
+def _prepare_config(spec: DeploymentSpec, instance: Instance, resolved: dict[str, ResolvedRole], port: int) -> str:
     """A stdlib-only program run on the batch node after hosts are allocated."""
     roles = [
         {"name": role.name, "size": role.lws.size, "replicas": role.lws.replicas,
+         "labels": serving_labels(spec, instance, role),
          "api_nodes": resolved[role.name].api_nodes,
          "ports": (resolved[role.name].ports.public if role.routing_proxy else resolved[role.name].ports.backend)}
         for role in spec.roles
     ]
-    configs = file_discovery_config(spec.routing, "MANIFESTO_ENDPOINTS")
+    configs = {
+        name: yaml.safe_dump(config, sort_keys=False)
+        for name, config in file_discovery_config(spec.routing, "MANIFESTO_ENDPOINTS").items()
+    }
     envoy = yaml.safe_load(ENVOY_CONFIG)
     for listener in envoy["static_resources"]["listeners"]:
         if listener["name"] == "vllm":
@@ -60,11 +62,11 @@ def _prepare_config(spec: DeploymentSpec, resolved: dict[str, ResolvedRole], por
 from pathlib import Path
 root = Path(os.environ["MANIFESTO_ROUTER_DIR"])
 (root / "epp").mkdir()
-configs = json.loads({json.dumps(configs)!r})
+configs = {configs!r}
 for name, content in configs.items():
     (root / "epp" / name).write_text(content.replace("MANIFESTO_ENDPOINTS", str(root / "endpoints.json")))
 (root / "envoy.yaml").write_text({envoy_config!r})
-roles = json.loads({json.dumps(roles)!r})
+roles = {roles!r}
 endpoints = []
 for group, role in enumerate(roles):
     hosts = os.environ[f"MANIFESTO_HOSTS_{{group}}"].splitlines()
@@ -82,8 +84,7 @@ for group, role in enumerate(roles):
             endpoints.append({{
                 "name": f"{{role['name']}}-{{replica}}-{{worker}}-{{port}}",
                 "namespace": {spec.namespace!r}, "address": address, "port": str(port),
-                "labels": {{"llm-d.ai/role": role["name"], "model": {spec.model.id!r},
-                           "leaderworkerset.sigs.k8s.io/worker-index": str(worker)}},
+                "labels": {{**role["labels"], "leaderworkerset.sigs.k8s.io/worker-index": str(worker)}},
             }})
     (root / f"api-hosts-{{group}}").write_text(",".join(api_hosts))
 (root / "endpoints.json").write_text(json.dumps({{"endpoints": endpoints}}, indent=2))
@@ -123,20 +124,12 @@ def render_routed(
         if group == 0:
             cpus += settings.router_cpus
             memory += router_mem
-        directives = {
-            "job-name": name, "nodes": role.lws.size * role.lws.replicas,
-            "ntasks": role.lws.size * role.lws.replicas, "ntasks-per-node": 1,
-            "cpus-per-task": cpus, "mem": f"{memory}M",
-            "gres": f"{gpu.gres}:{role.gpus_per_pod}", "time": settings.time,
-        }
+        lines += batch_directives(
+            settings, name=name, nodes=role.lws.size * role.lws.replicas,
+            cpus=cpus, memory=memory, gres=f"{gpu.gres}:{role.gpus_per_pod}",
+        )
         if group == 0:
-            directives.update({"output": f"{name}-%j.out", "export": "ALL"})
-        for key in ("partition", "account", "qos", "constraint"):
-            if value := getattr(settings, key):
-                directives[key] = value
-        lines.extend(f"#SBATCH --{key}={value}" for key, value in directives.items())
-        if settings.exclusive:
-            lines.append("#SBATCH --exclusive")
+            lines += [f"#SBATCH --output={name}-%j.out", "#SBATCH --export=ALL"]
     lines += [
         "# Generated by Manifesto. llm-d uses file discovery; all services share this job's lifetime.",
         *(f"# {line}" for line in header or []),
@@ -173,7 +166,7 @@ def render_routed(
     for group, role in enumerate(spec.roles):
         nodelist = f"SLURM_JOB_NODELIST_HET_GROUP_{group}" if heterogeneous else "SLURM_JOB_NODELIST"
         lines.append(f'export MANIFESTO_HOSTS_{group}=$(scontrol show hostnames "${{{nodelist}}}")')
-    lines += _script_variable("MANIFESTO_PREPARE", _prepare_config(spec, resolved, settings.port))
+    lines += _script_variable("MANIFESTO_PREPARE", _prepare_config(spec, instance, resolved, settings.port))
     lines += ['python3 -c "$MANIFESTO_PREPARE"',
               'MANIFESTO_ROUTER_HOST="${MANIFESTO_HOSTS_0%%$\'\\n\'*}"',
               f'echo "Manifesto endpoint: http://${{MANIFESTO_ROUTER_HOST}}:{settings.port}"']

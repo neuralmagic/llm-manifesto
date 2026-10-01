@@ -224,6 +224,11 @@ def render_routing(
                     "verbs": ["get", "list", "watch"],
                 },
                 {
+                    "apiGroups": ["llm-d.ai"],
+                    "resources": ["inferenceobjectives", "inferencemodelrewrites"],
+                    "verbs": ["get", "list", "watch"],
+                },
+                {
                     "apiGroups": ["inference.networking.x-k8s.io"],
                     "resources": [
                         "inferencemodelrewrites",
@@ -256,7 +261,7 @@ def render_routing(
             "apiVersion": "v1",
             "kind": "ConfigMap",
             "metadata": {"name": instance.name("epp-config"), "labels": instance.labels("routing")},
-            "data": plugin_configs,
+            "data": {name: yaml.safe_dump(config, sort_keys=False) for name, config in plugin_configs.items()},
         },
         *(
             [
