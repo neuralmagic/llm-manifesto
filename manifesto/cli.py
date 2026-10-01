@@ -479,7 +479,7 @@ def _build_parser() -> argparse.ArgumentParser:
     slurm_servers.add_argument("--cluster")
     slurm_servers.add_argument("--output", choices=["table", "name", "json"], default="table")
     slurm_servers.set_defaults(func=slurm.servers)
-    slurm_stop = slurm_sub.add_parser("stop", help="cancel a Slurm job or one array element")
+    slurm_stop = slurm_sub.add_parser("stop", help="cancel a Slurm job, array element, or heterogeneous component")
     slurm_stop.add_argument("job_id")
     slurm_stop.add_argument("--cluster")
     slurm_stop.set_defaults(func=slurm.stop)

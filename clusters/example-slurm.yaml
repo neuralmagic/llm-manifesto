@@ -5,7 +5,7 @@ platform: slurm
 slurm:
   partition: gpu
   time: "02:00:00"
-  runtime: apptainer  # apptainer, singularity, or native
+  runtime: apptainer  # apptainer, singularity, pyxis, or native
   exclusive: true
   binds:
     - {source: /shared, target: /shared}

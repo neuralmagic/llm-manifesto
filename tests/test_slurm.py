@@ -87,7 +87,7 @@ def test_kubernetes_cluster_settings_are_rejected():
 
 
 @pytest.mark.parametrize("update", [
-    {"routing": {"kind": "load_aware"}},
+    {"routing": {"kind": "load_aware", "frontend": "gateway"}},
     {"routing": {"kind": "disabled", "epp": {"image": "test/epp"}}},
     {"runtime": {"sidecars": ["dcgm-exporter"]}},
     {"runtime": {"idle_shutdown": {"enabled": True}}},
@@ -311,7 +311,7 @@ def test_slurm_routing_override_is_validated(offline, monkeypatch, capsys, sourc
         monkeypatch.setenv("MANIFESTO_ROUTING_PROFILE", profile)
 
     assert main(args) == 2
-    assert "Slurm does not support routing profiles" in capsys.readouterr().err
+    assert "routing profiles require llm-d routing" in capsys.readouterr().err
 
 
 def test_slurm_env_default_selects_script_output(offline, monkeypatch):

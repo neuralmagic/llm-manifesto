@@ -17,6 +17,7 @@ from ..instance import Instance
 from ..launch import build_launch_script
 from ..resolve import POD_CACHE_MOUNT, ResolvedRole
 from ..spec import DeploymentSpec, RoleSpec
+from ..routing import proxy_args
 from ..workload import (
     KUEUE_QUEUE_LABEL as KUEUE_QUEUE_LABEL,
     DeploymentPolicy,
@@ -80,13 +81,7 @@ def render_workload(
                 "name": "routing-proxy",
                 "image": cluster.llm_d.routing_sidecar,
                 "imagePullPolicy": "Always",
-                "args": [
-                    f"--port={resolved.ports.public[0]}",
-                    f"--vllm-port={resolved.ports.backend[0]}",
-                    f"--data-parallel-size={resolved.ports.rank_count}",
-                    "--secure-proxy=false",
-                    "--connector=nixlv2",
-                ],
+                "args": proxy_args(resolved.ports),
                 "ports": [
                     {"containerPort": port, "name": f"rank{idx}", "protocol": "TCP"}
                     for idx, port in enumerate(resolved.ports.public)

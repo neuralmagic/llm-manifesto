@@ -377,7 +377,7 @@ class Cluster(BaseModel):
             if is_slurm and accelerator.node_selector:
                 raise ValueError("Slurm placement uses slurm.constraint, not node_selector")
         if is_slurm:
-            for field in ("storage", "pod_defaults", "rdma", "openshift", "kueue", "gateway", "llm_d"):
+            for field in ("storage", "pod_defaults", "rdma", "openshift", "kueue", "gateway"):
                 value = getattr(self, field)
                 if value != type(value)():
                     raise ValueError(f"{field} is Kubernetes-only; use Slurm binds and filesystem paths")

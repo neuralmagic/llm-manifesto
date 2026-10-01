@@ -1083,12 +1083,14 @@ def test_pd_cross_node_tp_filters_decode_leaders_in_epp_profile():
         if plugin.get("name") == "manifesto-decode-api-server-filter"
     )
     assert leader_filter == {
-        "type": "by-label",
+        "type": "label-selector-filter",
         "name": "manifesto-decode-api-server-filter",
         "parameters": {
-            "label": "leaderworkerset.sigs.k8s.io/worker-index",
-            "validValues": ["0"],
-            "allowsNoLabel": False,
+            "matchExpressions": [{
+                "key": "leaderworkerset.sigs.k8s.io/worker-index",
+                "operator": "In",
+                "values": ["0"],
+            }],
         },
     }
 
@@ -1118,7 +1120,7 @@ def test_pd_cross_node_tp_filters_each_role_profile():
 
     for profile_name in ("prefill", "decode"):
         filter_name = f"manifesto-{profile_name}-api-server-filter"
-        assert plugins[filter_name]["parameters"]["validValues"] == ["0"]
+        assert plugins[filter_name]["parameters"]["matchExpressions"][0]["values"] == ["0"]
         assert [
             plugin["pluginRef"]
             for plugin in profiles[profile_name]["plugins"][:2]
@@ -1171,7 +1173,7 @@ def test_pd_dp2_tp8_decode_uses_two_routable_two_node_tp_groups():
         for plugin in config["plugins"]
         if plugin.get("name") == "manifesto-decode-api-server-filter"
     )
-    assert leader_filter["parameters"]["validValues"] == ["0", "2"]
+    assert leader_filter["parameters"]["matchExpressions"][0]["values"] == ["0", "2"]
 
 
 def test_routing_disabled_dp2_tp8_uses_internal_vllm_load_balancing():
@@ -1352,7 +1354,7 @@ def test_api_placement_agrees_with_launch_probes_and_routing(
         config = yaml.safe_load(_find(objects, "ConfigMap", "epp-config")["data"]["plugins.yaml"])
         filters = [p for p in config["plugins"] if p.get("name") == "manifesto-default-api-server-filter"]
         if len(api_nodes) < nodes:
-            assert filters[0]["parameters"]["validValues"] == [str(node) for node in api_nodes]
+            assert filters[0]["parameters"]["matchExpressions"][0]["values"] == [str(node) for node in api_nodes]
         else:
             assert filters == []
 
@@ -1386,7 +1388,7 @@ def test_cross_node_tp_custom_epp_render_is_repeatable_and_non_mutating():
         for plugin in first_selected["plugins"]
         if plugin.get("name") == "manifesto-decode-api-server-filter"
     )
-    assert first_filter["parameters"]["validValues"] == ["0"]
+    assert first_filter["parameters"]["matchExpressions"][0]["values"] == ["0"]
 
     decode.lws.size = 4
     decode.parallelism.dp = 2
@@ -1398,7 +1400,7 @@ def test_cross_node_tp_custom_epp_render_is_repeatable_and_non_mutating():
         for plugin in second_selected["plugins"]
         if plugin.get("name") == "manifesto-decode-api-server-filter"
     )
-    assert second_filter["parameters"]["validValues"] == ["0", "2"]
+    assert second_filter["parameters"]["matchExpressions"][0]["values"] == ["0", "2"]
     assert spec.routing.epp.plugin_configs == original_configs
 
 

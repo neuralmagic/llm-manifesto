@@ -50,6 +50,13 @@ class SlurmConfig(BaseModel):
     binds: list[SlurmBind] = Field(default_factory=list)
     ssh_host: str | None = None
     setup: list[str] = Field(default_factory=list)
+    # Added to each serving node's reservation. Router processes share the
+    # first node; disaggregation proxies run beside their model servers.
+    router_cpus: int = Field(8, ge=2)
+    router_memory: str = "16Gi"
+    proxy_cpus: int = Field(2, ge=1)
+    proxy_memory: str = "4Gi"
+    port: int = Field(8081, ge=1, le=65535)
 
     @field_validator("ssh_host")
     @classmethod
