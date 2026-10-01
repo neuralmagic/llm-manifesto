@@ -42,6 +42,7 @@ logging:
 
 pod_defaults:
   shm_size: 2Gi
+  ephemeral_storage: 32Gi
   # image_pull_secrets:
   #   - example-registry-credentials
 

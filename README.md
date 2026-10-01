@@ -525,6 +525,11 @@ pod_defaults:
 A dedicated model-server ServiceAccount is generated only when an OpenShift
 SCC must be bound to it.
 
+Set `pod_defaults.ephemeral_storage` in a Kubernetes cluster profile to request
+and limit scratch storage for each model container. A role's explicit
+`resources.ephemeral_storage` overrides this default. This setting also sizes
+the pod-local JIT cache when one is used.
+
 Cluster profiles own environment that should not be repeated in every model
 spec:
 
@@ -733,7 +738,8 @@ cache:
 ```
 
 For Deployment model pods, writable JIT caches live on a size-limited pod
-`emptyDir` (using the role's `ephemeral_storage` value, or 32Gi by default).
+`emptyDir` (using the role's `ephemeral_storage`, then the cluster's
+`pod_defaults.ephemeral_storage`, or 32Gi if neither is configured).
 They survive container restarts and disappear when Kubernetes removes the pod,
 so rollouts do not leave old cache directories on the persistent filesystem.
 The Hugging Face model cache remains on the configured shared or host volume.
@@ -772,8 +778,19 @@ Select `platform: slurm` in a cluster profile. Start with
 Apptainer/Singularity. Copy the profile into your private cluster catalog and
 set its partition, GPU type, runtime, and filesystem paths.
 
+Use the same model spec for either platform. The cluster profile selects the
+backend and default accelerator; the shared Qwen example has no platform-specific
+variant. For example, only `--cluster` changes here:
+
 ```bash
-manifesto render slurm models/qwen/slurm.yaml --cluster my-slurm -o qwen.sbatch
+manifesto render manifest models/qwen/qwen3-0.6b.yaml --cluster example-stateless-b200
+manifesto render manifest models/qwen/qwen3-0.6b.yaml --cluster example-slurm
+```
+
+To save and submit a batch script:
+
+```bash
+manifesto render slurm models/qwen/qwen3-0.6b.yaml --cluster my-slurm -o qwen.sbatch
 bash -n qwen.sbatch
 sbatch --test-only qwen.sbatch
 sbatch qwen.sbatch
@@ -787,8 +804,8 @@ The Slurm workflow commands run locally on a login node, or over SSH when the
 profile sets `slurm.ssh_host: user@login-host` (an SSH config alias also works):
 
 ```bash
-manifesto slurm submit models/qwen/slurm.yaml --cluster my-slurm --test-only
-manifesto deploy models/qwen/slurm.yaml --cluster my-slurm
+manifesto slurm submit models/qwen/qwen3-0.6b.yaml --cluster my-slurm --test-only
+manifesto deploy models/qwen/qwen3-0.6b.yaml --cluster my-slurm
 manifesto slurm servers --cluster my-slurm
 manifesto slurm stop 12345 --cluster my-slurm
 manifesto slurm stop 12345_0 --cluster my-slurm  # just one replica
@@ -865,8 +882,9 @@ See the [vLLM Rubin image guidance](https://docs.vllm.ai/en/latest/deployment/do
 and [Pyxis runtime options](https://github.com/NVIDIA/pyxis#usage).
 
 Kubernetes sidecars and idle shutdown are omitted when left at implicit
-defaults. Explicitly requesting them raises an error; portable direct-serving
-specs can set `runtime.sidecars: []` and `runtime.idle_shutdown.enabled: false`.
+defaults. Explicitly requesting them raises an error. Kubernetes pod storage
+defaults belong in the cluster's `pod_defaults`, so the model needs no Slurm
+variant or lifecycle overrides.
 P/D routing, Kubernetes workload overrides, PVCs, Kueue, DRA, and Kubernetes
 ephemeral-storage/shared-memory requests are unsupported. Use Slurm wall time
 and `slurm stop` for lifecycle control. `ready`, `test e2e`, and `file apply/diff`
@@ -905,7 +923,7 @@ from manifesto.render import render
 from manifesto.spec import load_spec
 
 cluster = load_cluster("clusters/example-slurm.yaml")
-spec = load_spec("models/qwen/slurm.yaml", cluster)
+spec = load_spec("models/qwen/qwen3-0.6b.yaml", cluster)
 artifact = render(spec, user="tester", cluster=cluster)
 ```
 

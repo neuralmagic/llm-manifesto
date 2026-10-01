@@ -566,7 +566,7 @@ def test_deployment_jit_caches_follow_pod_lifetime():
     assert {mount["name"]: mount["mountPath"] for mount in container["volumeMounts"]}[
         "pod-jit-cache"
     ] == "/var/cache/manifesto-pod"
-    pod_cache_root = f"/var/cache/manifesto-pod/jit-cache/b200/cu13/{spec.cache_key}/{spec.release}"
+    pod_cache_root = f"/var/cache/manifesto-pod/jit-cache/gb200/cu13/{spec.cache_key}/{spec.release}"
     assert {env[name] for name in (
         "HOME", "XDG_CACHE_HOME", "VLLM_CACHE_ROOT", "FLASHINFER_CACHE_DIR",
         "FLASHINFER_WORKSPACE_BASE", "FLASH_ATTENTION_CUTE_DSL_CACHE_DIR",

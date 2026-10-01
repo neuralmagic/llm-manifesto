@@ -7,7 +7,6 @@ model:
   label: Qwen3-0.6B
   image_ref: vllm.standard
 
-accelerator: b200
 routing: {kind: disabled}
 runtime: {sidecars: []}
 
@@ -15,7 +14,7 @@ roles:
   - name: decode
     lws: {size: 1}
     parallelism: {tp: 1, dp: false, ep: false}
-    resources: {cpu: "8", memory: 32Gi, gpus: 1, ephemeral_storage: 32Gi}
+    resources: {cpu: "8", memory: 32Gi, gpus: 1}
     vllm:
       enable-prompt-tokens-details: true
       enable-auto-tool-choice: true

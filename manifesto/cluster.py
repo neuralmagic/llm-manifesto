@@ -100,6 +100,7 @@ class PodDefaults(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     shm_size: str = "2Gi"
+    ephemeral_storage: str | None = None
     dns_policy: Literal["ClusterFirst", "Default", "ClusterFirstWithHostNet", "None"] | None = None
     dns_config: dict[str, Any] = Field(default_factory=dict)
     annotations: dict[str, str] = Field(default_factory=dict)

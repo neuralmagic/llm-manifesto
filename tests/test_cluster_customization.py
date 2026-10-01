@@ -170,6 +170,34 @@ def test_openshift_scc_binding_targets_release_service_account():
     ]
 
 
+@pytest.mark.parametrize("nodes", [1, 2])
+@pytest.mark.parametrize(("cluster_default", "role_override", "expected"), [
+    (None, None, None),
+    ("32Gi", None, "32Gi"),
+    ("32Gi", "64Gi", "64Gi"),
+])
+def test_model_pod_storage_uses_cluster_default_unless_role_overrides(
+    nodes, cluster_default, role_override, expected
+):
+    cluster = _custom_cluster()
+    cluster.pod_defaults.ephemeral_storage = cluster_default
+    spec = _spec(cluster)
+    role = spec.roles[0]
+    role.lws.size = nodes
+    role.parallelism.dp = nodes * 2
+    role.resources.ephemeral_storage = role_override
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
+    workload = next(obj for obj in objects if obj["metadata"]["name"].endswith("-decode"))
+    pod = (workload["spec"]["template"] if nodes == 1 else
+           workload["spec"]["leaderWorkerTemplate"]["workerTemplate"])["spec"]
+    resources = pod["containers"][0]["resources"]
+    for kind in ("requests", "limits"):
+        assert resources[kind].get("ephemeral-storage") == expected
+    if nodes == 1:
+        cache = next(volume for volume in pod["volumes"] if volume["name"] == "pod-jit-cache")
+        assert cache["emptyDir"]["sizeLimit"] == (expected or "32Gi")
+
+
 def test_role_can_override_cluster_fabric_profile():
     cluster = _custom_cluster()
     cluster.fabric.profiles["custom_ep"] = cluster.fabric.profiles["standard"].model_copy(

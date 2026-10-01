@@ -24,7 +24,7 @@ from manifesto.spec import DeploymentSpec, load_spec
 
 ROOT = Path(__file__).resolve().parents[1]
 CLUSTER = ROOT / "clusters/example-slurm.yaml"
-MODEL = ROOT / "models/qwen/slurm.yaml"
+MODEL = ROOT / "models/qwen/qwen3-0.6b.yaml"
 
 
 @pytest.fixture

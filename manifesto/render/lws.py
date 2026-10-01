@@ -44,6 +44,7 @@ def render_workload(
     layout = resolved.layout
     workload_name = resolved.workload_name
     pod_cache = resolved.persistent_cache and resolved.features.workload_kind == WorkloadKind.DEPLOYMENT
+    ephemeral_storage = role.resources.ephemeral_storage or cluster.pod_defaults.ephemeral_storage
 
     containers, extra_volumes = sidecars(
         spec.runtime.sidecars,
@@ -55,7 +56,7 @@ def render_workload(
         volumes.append(
             {
                 "name": "pod-jit-cache",
-                "emptyDir": {"sizeLimit": role.resources.ephemeral_storage or "32Gi"},
+                "emptyDir": {"sizeLimit": ephemeral_storage or "32Gi"},
             }
         )
     if role.shm_size:
@@ -144,11 +145,9 @@ def render_workload(
         vllm_container["securityContext"] = security_context
     if cluster.pod_defaults.working_dir:
         vllm_container["workingDir"] = cluster.pod_defaults.working_dir
-    if role.resources.ephemeral_storage:
+    if ephemeral_storage:
         for resource_kind in ("requests", "limits"):
-            vllm_container["resources"][resource_kind]["ephemeral-storage"] = (
-                role.resources.ephemeral_storage
-            )
+            vllm_container["resources"][resource_kind]["ephemeral-storage"] = ephemeral_storage
     if not resolved.has_headless_nodes and len(readiness_ports) == 1:
         readiness_action = {
             "httpGet": {"path": "/v1/models", "port": readiness_ports[0]},
