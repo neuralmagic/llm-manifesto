@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -121,6 +121,7 @@ class RuntimeConfig:
     render_out: Path
     context: str | None = None
     platform: str = "kubernetes"
+    loaded_cluster: Cluster | None = field(default=None, repr=False, compare=False)
 
     @classmethod
     def from_args(cls, args, *, require_cluster: bool = True) -> "RuntimeConfig":
@@ -129,7 +130,12 @@ class RuntimeConfig:
         context = getattr(args, "context", None)
         # An explicit Slurm profile must never require kubectl, even to choose
         # defaults. Keep Kubernetes context discovery for Kubernetes commands.
-        explicit_cluster = getattr(args, "cluster", None) or os.environ.get("MANIFESTO_CLUSTER")
+        # Saved-file and stateless Kubernetes commands do not need the ambient
+        # model cluster profile. Still honor a profile explicitly passed to an
+        # optional-profile command such as ready or stop.
+        explicit_cluster = getattr(args, "cluster", None)
+        if require_cluster and not explicit_cluster:
+            explicit_cluster = os.environ.get("MANIFESTO_CLUSTER")
         selected = (
             load_cluster_with_overrides(resolve_catalog_path(explicit_cluster, "clusters"), args)
             if explicit_cluster else None
@@ -159,6 +165,7 @@ class RuntimeConfig:
             render_out=render_out,
             context=context,
             platform="slurm" if is_slurm else "kubernetes",
+            loaded_cluster=selected,
         )
 
     def kubectl_base(self) -> list[str]:
@@ -377,6 +384,8 @@ def resolve_cluster(explicit: str | None = None, *, context: str | None = None) 
 
 
 def load_runtime_cluster(config: RuntimeConfig, args):
+    if config.loaded_cluster is not None:
+        return config.loaded_cluster
     if not config.cluster_path:
         raise WorkflowError("No cluster profile configured.", code=2)
     return load_cluster_with_overrides(config.cluster_path, args)
@@ -1274,9 +1283,12 @@ def stop(args) -> int:
     if args.spec:
         spec = load_spec(resolve_model(args.spec))
         cluster_path = getattr(args, "cluster", None) or os.environ.get("MANIFESTO_CLUSTER")
-        include_user_in_name = (
-            load_cluster(resolve_cluster(cluster_path)).naming.user_prefix if cluster_path else False
-        )
+        cluster = config.loaded_cluster
+        if cluster is None and cluster_path:
+            cluster = load_cluster(resolve_cluster(cluster_path))
+        if cluster is not None and cluster.platform == "slurm":
+            raise WorkflowError("Use manifesto slurm stop JOB_ID to stop Slurm jobs", code=2)
+        include_user_in_name = cluster.naming.user_prefix if cluster is not None else False
         instance_id = Instance(
             user=config.user,
             release=spec.release,

@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 
@@ -359,3 +360,79 @@ def test_kubernetes_workload_settings_reject_slurm_allocation():
 
     with pytest.raises(ValueError, match="cannot use Slurm"):
         WorkloadAccelerator.model_validate({"allocation": {"slurm": {"gres": "gpu"}}})
+
+
+@pytest.mark.parametrize("cluster_name", ["example-slurm", "example-stateless-b200"])
+def test_cluster_profile_from_process_substitution_is_read_once(cluster_name):
+    command = [
+        sys.executable, "-c",
+        "from manifesto.cli import main; import sys; sys.exit(main(sys.argv[1:]))",
+        "render", "manifest", str(MODEL), "--cluster",
+    ]
+    # Bash supplies a non-seekable /dev/fd stream, as the generated provenance
+    # command does. Reopening it after backend detection would read only EOF.
+    shell = shlex.join(command) + f" <(cat clusters/{cluster_name}.yaml) --user tester"
+    if cluster_name != "example-slurm":
+        shell += " --namespace test"
+    result = subprocess.run(
+        ["bash", "-c", shell], cwd=ROOT,
+        env={"PATH": os.environ["PATH"], "MANIFESTO_CONFIG_HOME": str(ROOT / ".tmp/empty-config")},
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"# name: {cluster_name}" in result.stdout
+    assert ("#SBATCH --gres=gpu:1" in result.stdout) == (cluster_name == "example-slurm")
+
+
+@pytest.mark.parametrize("ambient_profile", ["missing", "malformed", "slurm"])
+def test_stateless_kubernetes_commands_ignore_ambient_profile(monkeypatch, tmp_path, ambient_profile):
+    profile = tmp_path / "cluster.yaml"
+    if ambient_profile == "malformed":
+        profile.write_text("not-a-cluster: [\n")
+    elif ambient_profile == "slurm":
+        profile = CLUSTER
+    monkeypatch.setenv("MANIFESTO_CLUSTER", str(profile))
+    monkeypatch.delenv("MANIFESTO_RENDER_OUT", raising=False)
+    monkeypatch.setattr(workflow, "load_dotenv", lambda: None)
+    calls = []
+    monkeypatch.setattr(workflow, "run", lambda cmd, **kwargs: calls.append(cmd) or 0)
+    def discover(config, **kwargs):
+        calls.append(config.kubectl())
+        return []
+    monkeypatch.setattr(workflow, "discover_live_resources", discover)
+    monkeypatch.setattr(workflow, "delete_instance", lambda config, *a, **k: calls.append(config.kubectl()) or 0)
+    options = ["--context", "explicit-kube", "--namespace", "test"]
+
+    assert main(["file", "diff", *options]) == 0
+    assert main(["servers", *options]) == 0
+    assert main(["stop", "--instance", "my-instance", *options]) == 0
+    kubectl = ["kubectl", "--context", "explicit-kube", "-n", "test"]
+    assert calls == [
+        [*kubectl, "diff", "-f", "/tmp/manifesto.yaml"],
+        kubectl, kubectl, kubectl,
+    ]
+
+
+def test_explicit_and_required_profiles_still_fail_when_missing(offline, monkeypatch, capsys):
+    missing = str(ROOT / ".tmp/missing-cluster.yaml")
+    assert main(["render", "manifest", str(MODEL), "--cluster", missing]) == 2
+    assert "File not found" in capsys.readouterr().err
+    assert main(["ready", str(MODEL), "--cluster", missing]) == 2
+    assert "File not found" in capsys.readouterr().err
+    monkeypatch.setenv("MANIFESTO_CLUSTER", missing)
+    assert main(["render", "manifest", str(MODEL)]) == 2
+    assert "File not found" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_stop_spec_rejects_slurm_profile_before_cluster_mutation(monkeypatch, capsys, explicit):
+    monkeypatch.setattr(workflow, "load_dotenv", lambda: None)
+    monkeypatch.setenv("MANIFESTO_NAMESPACE", "test")
+    monkeypatch.setattr(workflow, "discover_live_resources", lambda *a, **k: pytest.fail("unexpected Kubernetes discovery"))
+    args = ["stop", str(MODEL)]
+    if explicit:
+        args += ["--cluster", str(CLUSTER)]
+    else:
+        monkeypatch.setenv("MANIFESTO_CLUSTER", str(CLUSTER))
+    assert main(args) == 2
+    assert "slurm stop JOB_ID" in capsys.readouterr().err
