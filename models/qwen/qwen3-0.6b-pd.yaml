@@ -1,0 +1,21 @@
+# Small prefill/decode deployment; the cluster selects the serving platform.
+release: qwen3-0-6b-pd
+topology: pd
+model:
+  id: Qwen/Qwen3-0.6B
+  image_ref: vllm.standard
+runtime:
+  sidecars: []
+roles:
+  - name: prefill
+    parallelism: {tp: 1, dp: false, ep: false}
+    resources: {cpu: "8", memory: 32Gi, gpus: 1}
+    kv_transfer_config: {kv_connector: NixlConnector, kv_role: kv_both}
+    vllm:
+      enable-prompt-tokens-details: true
+  - name: decode
+    parallelism: {tp: 1, dp: false, ep: false}
+    resources: {cpu: "8", memory: 32Gi, gpus: 1}
+    kv_transfer_config: {kv_connector: NixlConnector, kv_role: kv_both}
+    vllm:
+      enable-prompt-tokens-details: true

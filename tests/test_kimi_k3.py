@@ -142,7 +142,7 @@ def test_kimi_k3_rendered_pods_request_full_gb200_nodes():
         for plugin in plugins
         if plugin.get("name") == "manifesto-default-api-server-filter"
     )
-    assert api_filter["parameters"]["validValues"] == ["0"]
+    assert api_filter["parameters"]["matchExpressions"][0]["values"] == ["0"]
 
 
 def _pod_template(objects: list[dict], role: str) -> dict:

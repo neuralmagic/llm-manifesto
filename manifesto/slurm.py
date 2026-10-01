@@ -1,7 +1,7 @@
 """Render self-contained Slurm batch scripts and invoke Slurm client tools.
 
-One array element is one serving replica, with one srun task per node. All
-nodes in a replica share the allocation's first host as their rendezvous.
+Direct replicas use job arrays; routed replicas share an allocation. Both
+use one srun task per node and the first host in each replica as rendezvous.
 """
 
 from __future__ import annotations
@@ -13,10 +13,12 @@ import subprocess
 from decimal import Decimal, ROUND_CEILING
 
 from .cluster import Cluster
+from .features import connector_backends
 from .instance import Instance
 from .launch import build_launch_script
-from .resolve import CACHE_DIRS, resolve_role
-from .spec import DeploymentSpec, RoutingKind, TopologyKind
+from .resolve import CACHE_DIRS, ResolvedRole, resolve_role
+from .slurm_config import SlurmConfig
+from .spec import DeploymentSpec, RoleSpec, RoutingFrontend, RoutingKind, TopologyKind
 
 
 def _ceil(value: Decimal) -> int:
@@ -44,6 +46,23 @@ def memory_mib(value: str) -> int:
     return _ceil(size / (1024 ** 2))
 
 
+def batch_directives(
+    settings: SlurmConfig, *, name: str, nodes: int, cpus: int, memory: int, gres: str,
+) -> list[str]:
+    """Describe one allocation, whether a direct job or a routed component."""
+    directives = {
+        "job-name": name, "nodes": nodes, "ntasks": nodes, "ntasks-per-node": 1,
+        "cpus-per-task": cpus, "mem": f"{memory}M", "gres": gres, "time": settings.time,
+    }
+    for key in ("partition", "account", "qos", "constraint"):
+        if value := getattr(settings, key):
+            directives[key] = value
+    lines = [f"#SBATCH --{key}={value}" for key, value in directives.items()]
+    if settings.exclusive:
+        lines.append("#SBATCH --exclusive")
+    return lines
+
+
 def _script_variable(name: str, script: str) -> list[str]:
     delimiter = f"{name}_EOF"
     while delimiter in script.splitlines():
@@ -66,27 +85,113 @@ def _pyxis_image(image: str) -> str:
 def validate_slurm(spec: DeploymentSpec, cluster: Cluster) -> None:
     if cluster.platform != "slurm" or cluster.slurm is None:
         raise ValueError("Slurm rendering requires a platform: slurm cluster profile")
-    if spec.topology != TopologyKind.AGGREGATED or spec.routing.kind != RoutingKind.DISABLED:
-        raise ValueError("Slurm currently supports aggregated serving with routing.kind: disabled")
-    if spec.routing.epp is not None:
-        raise ValueError("Slurm does not support routing profiles")
-    if len(spec.roles) != 1:
-        raise ValueError("Slurm requires exactly one serving role; use lws.replicas for replicas")
+    routed = spec.routing.kind != RoutingKind.DISABLED
+    if not routed and spec.routing.epp is not None:
+        raise ValueError("routing profiles require llm-d routing")
+    if routed:
+        if not cluster.slurm.exclusive:
+            raise ValueError("Slurm llm-d requires slurm.exclusive: true because its services use fixed host ports")
+        if (spec.routing.kind == RoutingKind.PD) != (spec.topology == TopologyKind.PD):
+            raise ValueError("Slurm P/D routing requires topology: pd and routing.kind: pd")
+        if spec.routing.frontend != RoutingFrontend.STANDALONE:
+            raise ValueError("Slurm llm-d requires the standalone routing frontend")
+        replicas = spec.routing.epp.replicas if spec.routing.epp else spec.routing.replicas
+        if replicas != 1:
+            raise ValueError("Slurm supports one llm-d router per deployment")
+        expected = {"prefill", "decode"} if spec.topology == TopologyKind.PD else {spec.routing.target_role}
+        if {role.name for role in spec.roles} != expected:
+            raise ValueError(f"Slurm routing requires exactly these roles: {sorted(expected)}")
+    elif len(spec.roles) != 1:
+        raise ValueError("Slurm requires exactly one direct serving role; use lws.replicas for replicas")
     runtime = spec.runtime
     if "sidecars" in runtime.model_fields_set and runtime.sidecars:
         raise ValueError("Slurm does not support runtime.sidecars; set sidecars: []")
     if "idle_shutdown" in runtime.model_fields_set and runtime.idle_shutdown.enabled:
         raise ValueError("Slurm does not support idle shutdown; use slurm.time and disable idle_shutdown")
-    role = spec.roles[0]
-    if role.workload != "auto":
-        raise ValueError("Slurm requires workload: auto; Kubernetes workload kinds are unsupported")
-    if role.routing_proxy or role.kv_transfer_config:
-        raise ValueError("Slurm does not support routing proxies or KV-transfer connectors")
-    if role.resources.ephemeral_storage or role.shm_size:
-        raise ValueError("Slurm cannot allocate ephemeral_storage or shm_size; configure these on the host")
     spec.apply_cluster_defaults(cluster)
-    cpu_count(role.resources.cpu)
-    memory_mib(role.resources.memory)
+    for role in spec.roles:
+        if role.workload != "auto":
+            raise ValueError("Slurm requires workload: auto; Kubernetes workload kinds are unsupported")
+        if not routed and (role.routing_proxy or role.kv_transfer_config):
+            raise ValueError("Slurm routing proxies and KV-transfer connectors require llm-d routing")
+        if spec.topology == TopologyKind.PD and connector_backends(role.kv_transfer_config) != {"NixlConnector"}:
+            raise ValueError("Slurm P/D requires NixlConnector on both serving roles")
+        if role.resources.ephemeral_storage or role.shm_size:
+            raise ValueError("Slurm cannot allocate ephemeral_storage or shm_size; configure these on the host")
+        cpu_count(role.resources.cpu)
+        memory_mib(role.resources.memory)
+
+
+def launch_task(spec: DeploymentSpec, role: RoleSpec, resolved: ResolvedRole, *, routed: bool = False) -> str:
+    """Prepare one scheduled node, then reuse the platform-independent vLLM launch."""
+    task = [
+        "set -euo pipefail",
+        'export HOSTNAME="${SLURMD_NODENAME:-$(hostname)}"',
+        'export MANIFESTO_POD_UID="${SLURM_JOB_ID}-${SLURM_ARRAY_TASK_ID:-0}"',
+    ]
+    if routed:
+        task += [
+            'MANIFESTO_ROLE_HOSTS=(); while IFS= read -r host; do MANIFESTO_ROLE_HOSTS+=("$host"); done <<< "$MANIFESTO_HOSTS"',
+            'MANIFESTO_ROLE_IPS=(); while IFS= read -r address; do MANIFESTO_ROLE_IPS+=("$address"); done <<< "$MANIFESTO_IPS"',
+            f'export LWS_WORKER_INDEX=$(( SLURM_PROCID % {role.lws.size} ))',
+            'export LWS_LEADER_ADDRESS="${MANIFESTO_ROLE_HOSTS[SLURM_PROCID-LWS_WORKER_INDEX]}"',
+            f'MANIFESTO_ROLE={shlex.quote(role.name)}',
+            f'export MANIFESTO_POD_UID="${{SLURM_JOB_ID}}-${{MANIFESTO_ROLE}}-$(( SLURM_PROCID / {role.lws.size} ))"',
+        ]
+    else:
+        task.append('export LWS_WORKER_INDEX="$SLURM_PROCID"')
+    for key, value in resolved.env.items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise ValueError(f"invalid environment variable name: {key!r}")
+        task.append(f"export {key}={shlex.quote(value)}")
+    for contribution in resolved.features.field_ref_env:
+        if contribution.field_path != "status.podIP":
+            raise ValueError(f"unsupported Slurm environment source: {contribution.field_path}")
+        task.append(f'export {contribution.name}="${{MANIFESTO_ROLE_IPS[SLURM_PROCID]}}"')
+    if resolved.persistent_cache:
+        for key in CACHE_DIRS:
+            task.append(f'export {key}="${{{key}}}/${{MANIFESTO_POD_UID}}"')
+    task.append(build_launch_script(spec, role, resolved, respect_visible_devices=True))
+    return "\n".join(task)
+
+
+def step_command(
+    settings: SlurmConfig, image: str, command: str, options: list[str], *,
+    gpu: bool = False, router_config: bool = False, host_variable: str | None = None,
+) -> str:
+    """Run a command without requiring a shell in service container images."""
+    env = ("LWS_LEADER_ADDRESS", "MANIFESTO_HOSTS", "MANIFESTO_IPS", "CUDA_VISIBLE_DEVICES", "HF_TOKEN")
+    mounts = [f"{bind.source}:{bind.target}:" + ("ro" if bind.read_only else "rw") for bind in settings.binds]
+    srun = ["srun", *options, "--cpu-bind=none", "--kill-on-bad-exit=1", "--wait=30", "--export=ALL"]
+    prefix = shlex.join(srun)
+    if host_variable:
+        prefix += f' --nodelist="${{{host_variable}}}"'
+    if settings.runtime == "pyxis":
+        prefix += " " + shlex.join([
+            f"--container-image={_pyxis_image(image)}", "--no-container-entrypoint",
+            f"--container-env={','.join(env)}",
+        ])
+        if router_config:
+            mount_prefix = ",".join(mounts) + ("," if mounts else "")
+            prefix += " --container-mounts=" + shlex.quote(mount_prefix) + '\"$MANIFESTO_ROUTER_DIR:$MANIFESTO_ROUTER_DIR:ro\"'
+        elif mounts:
+            prefix += " " + shlex.quote(f"--container-mounts={','.join(mounts)}")
+    elif settings.runtime in {"apptainer", "singularity"}:
+        env_prefix = "APPTAINERENV" if settings.runtime == "apptainer" else "SINGULARITYENV"
+        # Slurm assigns the GPU mask per task, so forward it on the compute
+        # node, not from the batch process. The wrapper stays outside the image.
+        forward = "\n".join(f'if [ "${{{key}+set}}" = set ]; then export {env_prefix}_{key}="${{{key}}}"; fi' for key in env)
+        prefix += " " + shlex.join(["bash", "-c", forward + '\nexec "$@"', "manifesto", settings.runtime, "exec", "--no-eval"])
+        if gpu:
+            prefix += " --nv"
+        for mount in mounts:
+            prefix += " --bind " + shlex.quote(mount)
+        if router_config:
+            prefix += ' --bind "$MANIFESTO_ROUTER_DIR:$MANIFESTO_ROUTER_DIR:ro"'
+        if not ("://" in image or image.startswith(("/", "./", "../")) or image.endswith(".sif")):
+            image = f"docker://{image}"
+        prefix += " " + shlex.quote(image)
+    return prefix + " " + command
 
 
 def render_slurm(
@@ -97,6 +202,9 @@ def render_slurm(
     header: list[str] | None = None,
 ) -> str:
     validate_slurm(spec, cluster)
+    if spec.routing.kind != RoutingKind.DISABLED:
+        from .slurm_routing import render_routed
+        return render_routed(spec, user=user, cluster=cluster, header=header)
     settings = cluster.slurm
     assert settings is not None
     role = spec.roles[0]
@@ -110,28 +218,12 @@ def render_slurm(
         "ntasks-per-node": "1",
         "cpus-per-task": str(cpu_count(role.resources.cpu)),
     }
-    mounts = [
-        f"{bind.source}:{bind.target}:" + ("ro" if bind.read_only else "rw")
-        for bind in settings.binds
-    ]
-    directives = {
-        "job-name": name,
-        "nodes": str(role.lws.size),
-        **task_options,
-        "mem": f"{memory_mib(role.resources.memory)}M",
-        "gres": f"{allocation.gres}:{role.gpus_per_pod}",
-        "time": settings.time,
-        "output": f"{name}-%A_%a.out",
-        "export": "ALL",
-    }
-    for key in ("partition", "account", "qos", "constraint"):
-        if value := getattr(settings, key):
-            directives[key] = value
+    lines = ["#!/bin/bash", *batch_directives(
+        settings, name=name, nodes=role.lws.size, cpus=cpu_count(role.resources.cpu),
+        memory=memory_mib(role.resources.memory), gres=f"{allocation.gres}:{role.gpus_per_pod}",
+    ), f"#SBATCH --output={name}-%A_%a.out", "#SBATCH --export=ALL"]
     if role.lws.replicas > 1:
-        directives["array"] = f"0-{role.lws.replicas - 1}"
-    lines = ["#!/bin/bash", *(f"#SBATCH --{key}={value}" for key, value in directives.items())]
-    if settings.exclusive:
-        lines.append("#SBATCH --exclusive")
+        lines.append(f"#SBATCH --array=0-{role.lws.replicas - 1}")
     lines += [
         "# Generated by Manifesto. Inspect or edit before submitting with sbatch.",
         "# Slurm wall time controls lifetime; Kubernetes sidecars and idle shutdown are not installed.",
@@ -143,50 +235,11 @@ def render_slurm(
         'test -n "$LWS_LEADER_ADDRESS"',
         f'echo "Manifesto endpoint: http://${{LWS_LEADER_ADDRESS}}:{resolved.ports.backend[0]}"',
     ]
-    # Literal heredocs keep the artifact readable and self-contained. Slurm
-    # transfers only the batch script, not adjacent files.
-    launch = ["set -euo pipefail"]
-    for key, value in resolved.env.items():
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
-            raise ValueError(f"invalid environment variable name: {key!r}")
-        launch.append(f"export {key}={shlex.quote(value)}")
-    if resolved.persistent_cache:
-        for key in CACHE_DIRS:
-            launch.append(f'export {key}="${{{key}}}/${{MANIFESTO_POD_UID}}"')
-    launch.append(build_launch_script(spec, role, resolved, respect_visible_devices=True))
-    task = [
-        "set -euo pipefail",
-        'export LWS_WORKER_INDEX="$SLURM_PROCID"',
-        'export HOSTNAME="${SLURMD_NODENAME:-$(hostname)}"',
-        'export MANIFESTO_POD_UID="${SLURM_JOB_ID}-${SLURM_ARRAY_TASK_ID:-0}"',
-    ]
-    command = []
-    if settings.runtime in {"apptainer", "singularity"}:
-        prefix = "APPTAINERENV" if settings.runtime == "apptainer" else "SINGULARITYENV"
-        for key in ("LWS_WORKER_INDEX", "LWS_LEADER_ADDRESS", "HOSTNAME", "MANIFESTO_POD_UID", "CUDA_VISIBLE_DEVICES", "HF_TOKEN"):
-            task.append(f'if [ "${{{key}+set}}" = set ]; then export {prefix}_{key}="${{{key}}}"; fi')
-        image = spec.model.image
-        if not ("://" in image or image.startswith(("/", "./", "../")) or image.endswith(".sif")):
-            image = f"docker://{image}"
-        container = [settings.runtime, "exec", "--nv", "--no-eval"]
-        for mount in mounts:
-            container += ["--bind", mount]
-        command = [*container, image]
-    task.extend(_script_variable("MANIFESTO_LAUNCH", "\n".join(launch)))
-    task.append("exec " + shlex.join([*command, "bash", "-c"]) + ' "$MANIFESTO_LAUNCH"')
-    lines.extend(_script_variable("MANIFESTO_TASK", "\n".join(task)))
-    srun = [
-        "srun", *(f"--{key}={value}" for key, value in task_options.items()),
-        "--cpu-bind=none", "--kill-on-bad-exit=1", "--wait=30", "--export=ALL",
-    ]
-    if settings.runtime == "pyxis":
-        image = _pyxis_image(spec.model.image)
-        lines.append('export HF_TOKEN="${HF_TOKEN:-}"')
-        srun += [f"--container-image={image}", "--no-container-entrypoint",
-                 "--container-env=LWS_LEADER_ADDRESS,CUDA_VISIBLE_DEVICES,HF_TOKEN"]
-        if mounts:
-            srun.append(f"--container-mounts={','.join(mounts)}")
-    lines.append("exec " + shlex.join([*srun, "bash", "-c"]) + ' "$MANIFESTO_TASK"')
+    lines.append('export HF_TOKEN="${HF_TOKEN:-}"')
+    lines.extend(_script_variable("MANIFESTO_TASK", launch_task(spec, role, resolved)))
+    command = step_command(settings, spec.model.image, 'bash -c "$MANIFESTO_TASK"',
+                           [f"--{key}={value}" for key, value in task_options.items()], gpu=True)
+    lines.append("exec " + command)
     return "\n".join(lines) + "\n"
 
 
@@ -238,8 +291,8 @@ def servers(args) -> int:
 
 
 def stop(args) -> int:
-    if not re.fullmatch(r"[0-9]+(?:_[0-9]+)?", args.job_id):
-        raise ValueError("Slurm job ID must be numeric, optionally followed by _ARRAY_INDEX")
+    if not re.fullmatch(r"[0-9]+(?:[_+][0-9]+)?", args.job_id):
+        raise ValueError("Slurm job ID must be numeric, optionally followed by _ARRAY_INDEX or +COMPONENT")
     _capture(["scancel", args.job_id], cluster=_client_cluster(args))
     print(f"Stopped Slurm job {args.job_id}.")
     return 0

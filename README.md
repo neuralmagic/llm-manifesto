@@ -28,9 +28,9 @@ It emits raw Kubernetes manifests:
 - per-pod monitoring sidecars
 - instance-scoped names, labels, selectors, and cache paths
 
-For Slurm profiles, it emits self-contained `sbatch` scripts for direct vLLM
-serving. See [Slurm](#slurm) for runtime choices, remote submission, and supported
-topologies.
+For Slurm profiles, it emits self-contained `sbatch` scripts for direct vLLM,
+llm-d load-aware routing, and prefill/decode disaggregation. See [Slurm](#slurm)
+for runtime choices, remote submission, and supported topologies.
 
 The rendered YAML starts with provenance comments:
 
@@ -821,15 +821,15 @@ SSH authentication must already work without a password prompt.
 
 ### Allocation and launch
 
-Slurm currently supports one direct vLLM role with `topology: aggregated` and
-`routing.kind: disabled`. TP, PP, DP, EP, computed arguments, model revision,
-pre-launch hooks, profiling, and existing vLLM environments use the same model
-schema and launch logic as Kubernetes.
+Slurm supports direct vLLM, llm-d load-aware routing, and NIXL prefill/decode
+disaggregation. TP, PP, DP, EP, computed arguments, model revision, pre-launch
+hooks, profiling, and existing vLLM environments use the same model schema
+and launch logic as Kubernetes.
 
 | Model setting | Slurm behavior |
 | --- | --- |
 | `lws.size` | Nodes per serving replica, one `srun` task per node |
-| `lws.replicas` | Independent job array elements, each with its own allocation |
+| `lws.replicas` | Direct serving: job array elements. llm-d: replicas in one routed allocation |
 | `parallelism` | GPUs per node derived from `tp × pp × dp ÷ lws.size` |
 | `resources.cpu` | CPUs per task, rounded up to a whole CPU |
 | `resources.memory` | Memory per node, converted to MiB and rounded up |
@@ -841,14 +841,65 @@ nodes in the replica. Manifesto passes Slurm's `CUDA_VISIBLE_DEVICES` unchanged
 into each container, including noncontiguous device IDs and UUIDs. One vLLM
 launcher per node starts the local DP engines and assigns their devices. For
 DP, vLLM's coordinator manages the group, with the API on the first node and
-headless workers on the remaining nodes. Replicas have separate endpoints;
-Manifesto does not install a load balancer on Slurm.
+headless workers on the remaining nodes for direct serving. llm-d uses external
+DP balancing and discovers each API endpoint, excluding headless nodes.
 
 Cluster accelerator allocation uses `slurm: {gres: gpu}` or a typed value such
 as `slurm: {gres: "gpu:nvidia_gr100"}`. Omit the count; Manifesto derives it.
 `slurm.partition`, `account`, `qos`, and `constraint` map to scheduler options.
 Jobs request exclusive nodes by default because vLLM binds host ports. If you
-disable `slurm.exclusive`, ensure concurrently running jobs use distinct ports.
+disable `slurm.exclusive` for direct serving, ensure concurrently running jobs
+use distinct ports. llm-d requires exclusive nodes because its router and P/D
+services use fixed host ports.
+
+### llm-d routing and prefill/decode
+
+The same routed model works on Kubernetes and Slurm. For example:
+
+```bash
+manifesto render manifest models/qwen/qwen3-0.6b-pd.yaml --cluster my-slurm > pd.sbatch
+manifesto slurm submit models/qwen/qwen3-0.6b-pd.yaml --cluster my-slurm --test-only
+manifesto deploy models/qwen/qwen3-0.6b-pd.yaml --cluster my-slurm
+```
+
+For aggregated load-aware serving, set `routing.kind: load_aware` and choose
+`lws.replicas` in the model. Routing profiles from `--routing-profile` work on
+both platforms. Cluster configuration owns the runtime and endpoint discovery.
+
+Manifesto follows llm-d's [non-Kubernetes deployment path](https://github.com/llm-d/llm-d/tree/main/guides/no-kubernetes-deployment):
+
+- Envoy and the endpoint picker run on the first serving node. The batch log
+  prints their shared URL, using `slurm.port` (default `8081`).
+- Each serving role gets a heterogeneous Slurm job component with its own CPU,
+  memory, GPU, and node requests. Replicas use consecutive groups of nodes in
+  that component. P/D therefore requires Slurm's backfill scheduler and
+  heterogeneous-job support; aggregated serving uses a regular allocation.
+- The batch script resolves allocated hostnames to IPv4 addresses and writes
+  the endpoint picker's discovery file. It lists only API nodes and all their
+  DP ports. The allocation is fixed for the job's lifetime.
+- Decode proxies run beside API nodes and use the same NIXLv2 arguments as
+  Kubernetes. Both P/D roles must configure `NixlConnector`. The allocated node
+  address supplies `VLLM_NIXL_SIDE_CHANNEL_HOST` unless explicitly overridden.
+- Slurm reserves extra resources for auxiliary services: `slurm.router_cpus`
+  (8) and `router_memory` (`16Gi`) on each node of the first role, plus
+  `proxy_cpus` (2) and `proxy_memory` (`4Gi`) on each proxy role's node. The
+  router runs only on the first node; unused overhead on other nodes keeps
+  each role's allocation uniform. `srun --overlap` lets these CPU services
+  share the reserved nodes with vLLM.
+- All components share one job lifetime. A service failure stops the other
+  steps. Cancel the numeric leader job ID to stop the whole P/D deployment.
+
+The batch node needs Python 3 for config generation and IPv4 DNS resolution.
+Configs are staged on that node and mounted into the router containers; no
+shared config directory or Manifesto installation on the cluster is required.
+With `slurm.runtime: native`, install `epp`, `envoy`, and `pd-sidecar` on PATH
+alongside vLLM. With container runtimes, `cluster.llm_d` selects their images.
+
+The image catalog now uses llm-d router **v0.11.0** and its current image names,
+parser, label-filter, picker, and sidecar options. Custom routing profiles and
+pinned images must use compatible plugin/flag schemas. Kubernetes-dependent
+llm-d features (InferenceObjective controllers, model rewriting, PodMonitor
+discovery, Gateway API, and router HA) are outside the Slurm deployment path.
 
 ### Containers, storage, and lifetime
 
@@ -858,6 +909,10 @@ disable `slurm.exclusive`, ensure concurrently running jobs use distinct ports.
 - `slurm.runtime: pyxis` uses `srun --container-image`. Registry-qualified OCI
   names are converted to Enroot's `REGISTRY#IMAGE` syntax; absolute `.sqsh`
   paths work directly. The image entrypoint is bypassed so Manifesto starts vLLM.
+  Pyxis/Enroot also requires `/bin/sh` inside each image during startup. For
+  distroless llm-d/Envoy images, use shell-equipped images in `cluster.llm_d.images`
+  or bind a static shell of the node's architecture to `/bin/sh` through
+  `slurm.binds`. A dynamically linked host shell also needs its runtime libraries.
 - `slurm.runtime: native` uses vLLM from the host or `runtime.vllm_env`.
 - `slurm.binds` contains `{source: /host/path, target: /container/path}` entries
   with optional `read_only: true`. Paths must exist on every allocated node.
@@ -868,7 +923,8 @@ disable `slurm.exclusive`, ensure concurrently running jobs use distinct ports.
 - Use `cache.hf_home`, `paths.cache_root`, and `paths.log_root` for filesystem
   caches and logs. Writable compilation caches are isolated by job, array
   element, and hostname. Slurm also writes stdout/stderr to
-  `manifesto-RELEASE-JOB_ARRAYINDEX.out` in the submission directory.
+  `manifesto-RELEASE-JOB_ARRAYINDEX.out` for direct serving or
+  `manifesto-RELEASE-JOB.out` for llm-d in the submission directory.
 - Export `HF_TOKEN` in the submitting environment when needed. Ambient tokens
   are not embedded in scripts. With SSH, authentication and environment must
   be configured on the remote login host; local credentials are not forwarded.
@@ -885,7 +941,7 @@ Kubernetes sidecars and idle shutdown are omitted when left at implicit
 defaults. Explicitly requesting them raises an error. Kubernetes pod storage
 defaults belong in the cluster's `pod_defaults`, so the model needs no Slurm
 variant or lifecycle overrides.
-P/D routing, Kubernetes workload overrides, PVCs, Kueue, DRA, and Kubernetes
+Kubernetes workload overrides, PVCs, Kueue, DRA, and Kubernetes
 ephemeral-storage/shared-memory requests are unsupported. Use Slurm wall time
 and `slurm stop` for lifecycle control. `ready`, `test e2e`, and `file apply/diff`
 remain Kubernetes commands; inspect a Slurm endpoint with `/health` and submit

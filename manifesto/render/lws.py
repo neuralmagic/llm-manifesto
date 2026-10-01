@@ -17,6 +17,7 @@ from ..instance import Instance
 from ..launch import build_launch_script
 from ..resolve import POD_CACHE_MOUNT, ResolvedRole
 from ..spec import DeploymentSpec, RoleSpec
+from ..routing import proxy_args, serving_labels
 from ..workload import (
     KUEUE_QUEUE_LABEL as KUEUE_QUEUE_LABEL,
     DeploymentPolicy,
@@ -80,13 +81,7 @@ def render_workload(
                 "name": "routing-proxy",
                 "image": cluster.llm_d.routing_sidecar,
                 "imagePullPolicy": "Always",
-                "args": [
-                    f"--port={resolved.ports.public[0]}",
-                    f"--vllm-port={resolved.ports.backend[0]}",
-                    f"--data-parallel-size={resolved.ports.rank_count}",
-                    "--secure-proxy=false",
-                    "--connector=nixlv2",
-                ],
+                "args": proxy_args(resolved.ports),
                 "ports": [
                     {"containerPort": port, "name": f"rank{idx}", "protocol": "TCP"}
                     for idx, port in enumerate(resolved.ports.public)
@@ -179,11 +174,7 @@ def render_workload(
     if cluster.rdma.resource_name:
         for resources in ("requests", "limits"):
             vllm_container["resources"][resources][cluster.rdma.resource_name] = cluster.rdma.value
-    pod_labels = instance.labels("model-server", role.name) | {
-        "llm-d.ai/inferenceServing": "true",
-        "llm-d.ai/model": spec.model.label_value,
-        "llm-d.ai/deployment": spec.topology.value,
-    }
+    pod_labels = serving_labels(spec, instance, role)
     pod_metadata = {"labels": pod_labels}
     annotations = dict(cluster.pod_defaults.annotations)
     if Feature.LLM_D in resolved.features.enabled:
@@ -308,11 +299,7 @@ def render_workload(
         )
         return render_controller_workload(workload)[0]
 
-    workload_labels = instance.labels("lws", role.name) | {
-        "llm-d.ai/inferenceServing": "true",
-        "llm-d.ai/model": spec.model.label_value,
-        "llm-d.ai/deployment": spec.topology.value,
-    }
+    workload_labels = pod_labels | instance.labels("lws", role.name)
     workload = Workload(
         name=workload_name,
         backend=WorkloadBackend.LEADER_WORKER_SET,
