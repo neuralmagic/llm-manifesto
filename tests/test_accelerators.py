@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from manifesto.cluster import load_cluster
 from manifesto.instance import Instance
 from manifesto.render.lws import render_workload
+from manifesto.resolve import resolve_role
 from manifesto.spec import load_spec
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,11 +54,10 @@ def test_accelerator_node_selector_is_applied_to_model_pods():
     cluster.accelerators.profiles["gb200"].node_selector["gpu.product"] = "GB200"
     spec = load_spec(ROOT / "models" / "qwen" / "aggregated.yaml", cluster)
 
+    instance = Instance(user="tester", release=spec.release)
     workload = render_workload(
-        spec,
-        Instance(user="tester", release=spec.release),
-        cluster,
-        spec.roles[0],
+        spec, instance, cluster, spec.roles[0],
+        resolve_role(spec, instance, cluster, spec.roles[0]),
     )
     assert workload["spec"]["template"]["spec"]["nodeSelector"] == {
         "gpu.product": "GB200"

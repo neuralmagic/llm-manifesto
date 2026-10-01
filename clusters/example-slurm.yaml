@@ -1,0 +1,32 @@
+# Synthetic profile. Set partition/account and filesystem paths for your site.
+name: example-slurm
+platform: slurm
+
+slurm:
+  partition: gpu
+  time: "02:00:00"
+  runtime: apptainer  # apptainer, singularity, or native
+  exclusive: true
+  binds:
+    - {source: /shared, target: /shared}
+
+accelerators:
+  default: b200
+  profiles:
+    b200:
+      gpus_per_node: 8
+      allocation:
+        slurm: {gres: gpu}  # or gpu:b200 if the site uses typed GRES
+      gpu_arch: b200
+      torch_cuda_arch_list: "10.0+PTX"
+
+cache:
+  hf_home: /shared/huggingface
+paths:
+  cache_root: /shared/{user}/jit-cache/{gpu_arch}/{cache_key}/{release}
+  log_root: /shared/{user}/logs/{release}
+
+fabric:
+  ucx_net_devices: ""
+  profiles:
+    standard: {}

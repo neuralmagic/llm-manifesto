@@ -21,6 +21,7 @@ storage:
 
 pod_defaults:
   shm_size: 2Gi
+  ephemeral_storage: 32Gi
 
 fabric:
   ucx_net_devices: ""

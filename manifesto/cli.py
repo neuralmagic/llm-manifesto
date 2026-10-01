@@ -78,6 +78,34 @@ def _render_workload(args: argparse.Namespace) -> int:
     return 0
 
 
+def _slurm_render(args: argparse.Namespace) -> int:
+    config = RuntimeConfig.from_args(args)
+    cluster = load_runtime_cluster(config, args)
+    if cluster.platform != "slurm":
+        raise ValueError("render slurm requires a platform: slurm cluster profile")
+    script = render_manifest(args, config, cluster=cluster)
+    if args.output:
+        path = Path(args.output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(script)
+        print(path)
+    else:
+        sys.stdout.write(script)
+    return 0
+
+
+def _slurm_submit(args: argparse.Namespace) -> int:
+    config = RuntimeConfig.from_args(args)
+    cluster = load_runtime_cluster(config, args)
+    if cluster.platform != "slurm":
+        raise ValueError("slurm submit requires a platform: slurm cluster profile")
+    if args.test_only:
+        from .slurm import submit
+
+        return submit(render_manifest(args, config, cluster=cluster), cluster=cluster, test_only=True)
+    return deploy(args, config=config, cluster=cluster)
+
+
 def _explain(args: argparse.Namespace) -> int:
     """Print resolution provenance without adding metadata to rendered YAML."""
 
@@ -89,6 +117,10 @@ def _explain(args: argparse.Namespace) -> int:
         accelerator=getattr(args, "accelerator", None),
     )
     apply_runtime_overrides(spec, args, config)
+    if cluster.platform == "slurm":
+        from .slurm import validate_slurm
+
+        validate_slurm(spec, cluster)
     instance = Instance(
         user=config.user,
         release=spec.release,
@@ -107,7 +139,7 @@ def _explain(args: argparse.Namespace) -> int:
         roles.append(
             {
                 "name": role.name,
-                "workload": str(resolved.features.workload_kind),
+                "workload": "slurm" if cluster.platform == "slurm" else str(resolved.features.workload_kind),
                 "features": sorted(str(feature) for feature in resolved.features.enabled),
                 "backends": sorted(resolved.features.backends),
                 "fabric_profile": resolved.fabric_profile,
@@ -396,10 +428,14 @@ def _config_validate(args: argparse.Namespace) -> int:
 
     model_path = resolve_model(args.spec)
     spec = load_spec(model_path, cluster, accelerator=args.accelerator)
-    objects = render(spec, user=resolve_user(args.user), cluster=cluster)
+    artifact = render(spec, user=resolve_user(args.user), cluster=cluster)
+    if cluster.platform == "slurm":
+        summary = "1 Slurm batch script"
+    else:
+        summary = f"{len(list(yaml.safe_load_all(artifact)))} Kubernetes objects"
     print(f"Valid cluster: {Path(cluster_path).resolve()}")
     print(f"Valid model:   {Path(model_path).resolve()}")
-    print(f"Renders:       {len(objects)} Kubernetes objects")
+    print(f"Renders:       {summary}")
     return 0
 
 
@@ -416,14 +452,37 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="manifesto")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    render_parser = sub.add_parser("render", help="render Kubernetes manifests")
+    render_parser = sub.add_parser("render", help="render Kubernetes manifests or Slurm batch scripts")
     render_sub = render_parser.add_subparsers(dest="render_command", required=True)
 
     render_manifest_parser = render_sub.add_parser(
-        "manifest", help="render a full Kubernetes manifest to stdout"
+        "manifest", help="render a deployment artifact to stdout"
     )
     _add_render_args(render_manifest_parser)
     render_manifest_parser.set_defaults(func=lambda args: _render(args, routing_only=False))
+
+    render_slurm_parser = render_sub.add_parser("slurm", help="render a Slurm sbatch script")
+    _add_render_args(render_slurm_parser)
+    render_slurm_parser.add_argument("-o", "--output")
+    render_slurm_parser.set_defaults(func=_slurm_render)
+
+    from . import slurm
+
+    slurm_parser = sub.add_parser("slurm", help="manage Slurm serving jobs")
+    slurm_sub = slurm_parser.add_subparsers(dest="slurm_command", required=True)
+    slurm_submit = slurm_sub.add_parser("submit", help="render and submit with sbatch")
+    _add_render_args(slurm_submit)
+    slurm_submit.add_argument("--test-only", action="store_true", help="ask Slurm to validate without submitting a job")
+    slurm_submit.set_defaults(func=_slurm_submit)
+    slurm_servers = slurm_sub.add_parser("servers", help="list the user's live Manifesto Slurm jobs")
+    slurm_servers.add_argument("--user")
+    slurm_servers.add_argument("--cluster")
+    slurm_servers.add_argument("--output", choices=["table", "name", "json"], default="table")
+    slurm_servers.set_defaults(func=slurm.servers)
+    slurm_stop = slurm_sub.add_parser("stop", help="cancel a Slurm job or one array element")
+    slurm_stop.add_argument("job_id")
+    slurm_stop.add_argument("--cluster")
+    slurm_stop.set_defaults(func=slurm.stop)
 
     render_routing_parser = render_sub.add_parser(
         "routing", help="render routing-only Kubernetes YAML to stdout"
@@ -479,7 +538,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     deploy_parser = sub.add_parser(
         "deploy",
-        help="deploy a model or specialized Kubernetes resources",
+        help="deploy a model to Kubernetes or Slurm",
         usage=(
             "%(prog)s SPEC [OPTIONS]\n"
             "       %(prog)s routing SPEC [OPTIONS]\n"

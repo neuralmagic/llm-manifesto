@@ -19,3 +19,9 @@ backend: `extended_resource.resource_name` for extended-resource requests or
 `dra.device_class_name` for Manifesto-generated DRA `ResourceClaimTemplate`
 objects. Keep DeviceClass names and matching Kueue `deviceClassMappings` private
 when they are environment-specific.
+
+Slurm profiles set `platform: slurm`, a `slurm` configuration, and
+`allocation.slurm.gres` for every accelerator. `example-slurm.yaml` uses
+Apptainer. Keep login addresses (`slurm.ssh_host`), accounts, site constraints, and
+actual bind paths in private profiles. Slurm profiles are selected explicitly
+with `--cluster` or `MANIFESTO_CLUSTER` and do not use kube-context discovery.

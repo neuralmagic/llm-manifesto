@@ -15,8 +15,7 @@ from ..dra import (
 from ..features import Feature, WorkloadKind
 from ..instance import Instance
 from ..launch import build_launch_script
-from ..parallelism import parallel_layout
-from ..resolve import POD_CACHE_MOUNT, resolve_role
+from ..resolve import POD_CACHE_MOUNT, ResolvedRole
 from ..spec import DeploymentSpec, RoleSpec
 from ..workload import (
     KUEUE_QUEUE_LABEL as KUEUE_QUEUE_LABEL,
@@ -37,16 +36,15 @@ ACTIVE_PORTS_ANNOTATION = "inference.networking.k8s.io/active-ports"
 LWS_GROUP_KEY_LABEL = "leaderworkerset.sigs.k8s.io/group-key"
 
 
-def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, role: RoleSpec) -> dict:
-    resolved = resolve_role(spec, instance, cluster, role)
+def render_workload(
+    spec: DeploymentSpec, instance: Instance, cluster: Cluster, role: RoleSpec, resolved: ResolvedRole,
+) -> dict:
     accelerator = spec.accelerator_config(cluster)
-    external_dp = resolved.features.external_dp
-    multi_port_external_dp = external_dp and resolved.ports.rank_count > 1
-    layout = parallel_layout(role)
-    cross_node_model_parallel = layout.cross_node_model_parallel
-    distributed_dp = layout.distributed_dp
-    workload_name = role_workload_name(instance, role)
+    multi_port_external_dp = resolved.ports.rank_count > 1
+    layout = resolved.layout
+    workload_name = resolved.workload_name
     pod_cache = resolved.persistent_cache and resolved.features.workload_kind == WorkloadKind.DEPLOYMENT
+    ephemeral_storage = role.resources.ephemeral_storage or cluster.pod_defaults.ephemeral_storage
 
     containers, extra_volumes = sidecars(
         spec.runtime.sidecars,
@@ -58,7 +56,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
         volumes.append(
             {
                 "name": "pod-jit-cache",
-                "emptyDir": {"sizeLimit": role.resources.ephemeral_storage or "32Gi"},
+                "emptyDir": {"sizeLimit": ephemeral_storage or "32Gi"},
             }
         )
     if role.shm_size:
@@ -71,7 +69,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
     ]
     if multi_port_external_dp:
         container_ports.insert(0, {"containerPort": 8100, "name": "dp-supervisor"})
-    if distributed_dp:
+    if role.parallelism.dp_enabled and layout.node_count > 1:
         container_ports.append({"containerPort": 5555, "name": "dp-rpc"})
     readiness_ports = resolved.ports.public if resolved.features.routing_proxy else resolved.ports.backend
 
@@ -128,20 +126,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
         "image": spec.model.image,
         "command": ["/bin/bash", "-c"],
         "args": [
-            build_launch_script(
-                spec,
-                role,
-                resolved.ports,
-                log_dir=resolved.log_dir,
-                trace_dir=resolved.trace_dir,
-                vllm_env=resolved.vllm_env,
-                persistent_cache=resolved.persistent_cache,
-                vllm_args=resolved.vllm_args,
-                external_dp=external_dp,
-                multi_port_external_dp=multi_port_external_dp,
-                distributed_dp=distributed_dp,
-                vllm_raw_args=resolved.vllm_raw_args,
-            )
+            build_launch_script(spec, role, resolved)
         ],
         "env": container_env,
         "ports": container_ports,
@@ -160,57 +145,30 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
         vllm_container["securityContext"] = security_context
     if cluster.pod_defaults.working_dir:
         vllm_container["workingDir"] = cluster.pod_defaults.working_dir
-    if role.resources.ephemeral_storage:
+    if ephemeral_storage:
         for resource_kind in ("requests", "limits"):
-            vllm_container["resources"][resource_kind]["ephemeral-storage"] = (
-                role.resources.ephemeral_storage
-            )
-    if cross_node_model_parallel:
-        leader_readiness = " && ".join(
+            vllm_container["resources"][resource_kind]["ephemeral-storage"] = ephemeral_storage
+    if not resolved.has_headless_nodes and len(readiness_ports) == 1:
+        readiness_action = {
+            "httpGet": {"path": "/v1/models", "port": readiness_ports[0]},
+        }
+    else:
+        readiness_command = " && ".join(
             f"curl -sf http://localhost:{port}/v1/models | grep -q '\"id\"'"
             for port in readiness_ports
         )
-        if distributed_dp and external_dp:
-            readiness_guard = (
-                f"if (( ${{LWS_WORKER_INDEX:-0}} % {layout.model_parallel_node_count} != 0 )); "
-                "then exit 0; fi"
+        if resolved.has_headless_nodes:
+            api_pattern = "|".join(str(node) for node in resolved.api_nodes)
+            readiness_command = (
+                f'case "${{LWS_WORKER_INDEX:-0}}" in {api_pattern}) ;; *) exit 0 ;; esac; '
+                + readiness_command
             )
-        else:
-            readiness_guard = (
-                'if [ "${LWS_WORKER_INDEX:-0}" -gt 0 ]; then exit 0; fi'
-            )
-        vllm_container["readinessProbe"] = {
-            "exec": {
-                "command": [
-                    "/bin/bash",
-                    "-c",
-                    f"{readiness_guard}; {leader_readiness}",
-                ]
-            },
-            "periodSeconds": 5,
-            "failureThreshold": 120,
-        }
-    elif len(readiness_ports) == 1:
-        vllm_container["readinessProbe"] = {
-            "httpGet": {"path": "/v1/models", "port": readiness_ports[0]},
-            "periodSeconds": 5,
-            "failureThreshold": 120,
-        }
-    else:
-        vllm_container["readinessProbe"] = {
-            "exec": {
-                "command": [
-                    "/bin/bash",
-                    "-c",
-                    " && ".join(
-                        f"curl -sf http://localhost:{port}/v1/models | grep -q '\"id\"'"
-                        for port in readiness_ports
-                    ),
-                ]
-            },
-            "periodSeconds": 5,
-            "failureThreshold": 120,
-        }
+        readiness_action = {"exec": {"command": ["/bin/bash", "-c", readiness_command]}}
+    vllm_container["readinessProbe"] = {
+        **readiness_action,
+        "periodSeconds": 5,
+        "failureThreshold": 120,
+    }
     if multi_port_external_dp:
         vllm_container["startupProbe"] = {
             "httpGet": {"path": "/health", "port": "dp-supervisor"},
@@ -380,24 +338,17 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
     return render_controller_workload(workload)[0]
 
 
-def role_workload_name(instance: Instance, role: RoleSpec) -> str:
-    return (
-        instance.user_scoped_name(role.workload_name)
-        if role.workload_name
-        else instance.name(role.name)
-    )
-
-
 def render_accelerator_claim_template(
     spec: DeploymentSpec,
     instance: Instance,
     cluster: Cluster,
     role: RoleSpec,
+    resolved: ResolvedRole,
 ) -> dict | None:
     accelerator = spec.accelerator_config(cluster)
     if role.resources.gpus <= 0 or accelerator.device_class_name is None:
         return None
-    workload_name = role_workload_name(instance, role)
+    workload_name = resolved.workload_name
     labels = instance.labels("accelerator-claim-template", role.name)
     template_name = accelerator_claim_template_name(
         workload_name,

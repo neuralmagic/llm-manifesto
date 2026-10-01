@@ -8,8 +8,7 @@ import yaml
 
 from ..cluster import Cluster
 from ..instance import Instance
-from ..parallelism import parallel_layout
-from ..resolve import resolve_role
+from ..resolve import ResolvedRole
 from ..spec import DeploymentSpec, RoutingFrontend, RoutingKind, RoutingSpec
 
 _LWS_WORKER_INDEX_LABEL = "leaderworkerset.sigs.k8s.io/worker-index"
@@ -296,7 +295,7 @@ def _filter_api_servers(
     ]
     if not profiles:
         raise ValueError(
-            f"cross-node model parallel routing requires a {profile_name} scheduling profile"
+            f"API endpoint filtering requires a {profile_name} scheduling profile"
         )
     for profile in profiles:
         profile_plugins = profile.setdefault("plugins", [])
@@ -350,6 +349,7 @@ def _plugins_config_file(routing: RoutingSpec) -> str:
 def _profile_worker_indices(
     spec: DeploymentSpec,
     target_role: str,
+    resolved_roles: dict[str, ResolvedRole],
 ) -> dict[str, tuple[int, ...]]:
     profile_roles = (
         {"prefill": "prefill", "decode": "decode"}
@@ -358,13 +358,15 @@ def _profile_worker_indices(
     )
     result: dict[str, tuple[int, ...]] = {}
     for profile_name, role_name in profile_roles.items():
-        layout = parallel_layout(spec.role(role_name))
-        if layout.cross_node_model_parallel:
-            result[profile_name] = layout.serving_worker_indices
+        resolved = resolved_roles[role_name]
+        if resolved.has_headless_nodes:
+            result[profile_name] = resolved.api_nodes
     return result
 
 
-def render_routing(spec: DeploymentSpec, instance: Instance, cluster: Cluster) -> list[dict]:
+def render_routing(
+    spec: DeploymentSpec, instance: Instance, cluster: Cluster, resolved_roles: dict[str, ResolvedRole],
+) -> list[dict]:
     if spec.routing.kind is None:
         raise ValueError("routing kind must be resolved before rendering")
     if spec.routing.target_role is None:
@@ -373,14 +375,13 @@ def render_routing(spec: DeploymentSpec, instance: Instance, cluster: Cluster) -
         return []
 
     target_role = spec.routing.target_role
-    role = spec.role(target_role)
-    ports = resolve_role(spec, instance, cluster, role).ports
+    ports = resolved_roles[target_role].ports
     infpool_name = instance.name("infpool")
     epp_name = instance.name("infpool-epp")
     epp_role_name = instance.name("infpool-epp-rbac")
     plugin_configs = _plugin_configs(
         spec.routing,
-        profile_worker_indices=_profile_worker_indices(spec, target_role),
+        profile_worker_indices=_profile_worker_indices(spec, target_role, resolved_roles),
     )
     plugins_config_file = _plugins_config_file(spec.routing)
     standalone = spec.routing.frontend == RoutingFrontend.STANDALONE

@@ -2,7 +2,7 @@
 [project]
 name = "llm-manifesto"
 version = "0.4.0"
-description = "Declarative Kubernetes renderer for llm-d and vLLM deployments"
+description = "Declarative Kubernetes and Slurm renderer for llm-d and vLLM deployments"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [

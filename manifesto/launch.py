@@ -6,8 +6,7 @@ import json
 import shlex
 from typing import Any
 
-from .dp_ports import RolePorts
-from .parallelism import parallel_layout
+from .resolve import CACHE_DIRS, ResolvedRole
 from .spec import DeploymentSpec, RoleSpec
 
 
@@ -51,35 +50,25 @@ def _command_lines(parts: list[str | list[str]], *, indent: str = "") -> list[st
 def build_launch_script(
     spec: DeploymentSpec,
     role: RoleSpec,
-    ports: RolePorts,
+    resolved: ResolvedRole,
     *,
-    log_dir: str | None,
-    trace_dir: str | None = None,
-    vllm_env: str | None,
-    persistent_cache: bool = False,
-    vllm_args: dict[str, Any] | None = None,
-    external_dp: bool = False,
-    multi_port_external_dp: bool = False,
-    distributed_dp: bool = False,
-    vllm_raw_args: list[str] | None = None,
+    respect_visible_devices: bool = False,
 ) -> str:
-    layout = parallel_layout(role)
+    layout = resolved.layout
+    ports = resolved.ports
+    log_dir = resolved.log_dir
+    trace_dir = resolved.trace_dir
+    vllm_env = resolved.vllm_env
+    persistent_cache = resolved.persistent_cache
+    external_dp = resolved.features.external_dp
+    multi_port_external_dp = ports.rank_count > 1
+    headless_workers = resolved.has_headless_nodes
     cleanup_cache = persistent_cache and spec.cache.cleanup_on_crash
     lines = ["set -euo pipefail"]
     if persistent_cache:
         # A deployment shares its cache prefix across pods. Scope writable JIT
         # caches before crash cleanup so one pod cannot remove another's files.
-        for name in (
-            "HOME",
-            "XDG_CACHE_HOME",
-            "VLLM_CACHE_ROOT",
-            "FLASHINFER_CACHE_DIR",
-            "FLASHINFER_WORKSPACE_BASE",
-            "FLASH_ATTENTION_CUTE_DSL_CACHE_DIR",
-            "TRITON_CACHE_DIR",
-            "TORCHINDUCTOR_CACHE_DIR",
-            "TILELANG_CACHE_DIR",
-        ):
+        for name in CACHE_DIRS:
             lines.append(f'export {name}="${{{name}}}/${{HOSTNAME}}"')
         lines.append("")
     if log_dir:
@@ -195,131 +184,89 @@ def build_launch_script(
             f"DP_SIZE_LOCAL={layout.dp_local_size}",
             f"DP_SIZE={layout.dp_world_size}",
         ]
-        if not distributed_dp and role.lws.size > 1:
-            lines.append("START_RANK=$(( LWS_WORKER_INDEX * DP_SIZE_LOCAL ))")
-        elif not distributed_dp:
-            lines.append("START_RANK=0")
-    if layout.cross_node_model_parallel:
-        lines += ["HEADLESS_ARGS=()"]
-        if distributed_dp and external_dp:
-            lines += [
-                f"MODEL_PARALLEL_NODES={layout.model_parallel_node_count}",
-                'if (( LWS_WORKER_INDEX % MODEL_PARALLEL_NODES != 0 )); then',
-            ]
-        else:
-            lines.append('if [ "$LWS_WORKER_INDEX" -gt 0 ]; then')
-        lines += ["  HEADLESS_ARGS=(--headless)", "fi"]
-    single_rank = not role.parallelism.dp_enabled or distributed_dp
+        if layout.nodes_per_dp_rank == 1:
+            lines.append(
+                "START_RANK=$(( LWS_WORKER_INDEX * DP_SIZE_LOCAL ))"
+                if layout.node_count > 1 else "START_RANK=0"
+            )
+    if headless_workers:
+        api_pattern = "|".join(str(node) for node in resolved.api_nodes)
+        lines += [
+            "HEADLESS_ARGS=()",
+            'case "$LWS_WORKER_INDEX" in',
+            f"  {api_pattern}) ;;",
+            "  *)",
+            "    HEADLESS_ARGS=(--headless --api-server-count 0)",
+        ]
+        if layout.nodes_per_dp_rank == 1:
+            # vLLM infers ranks from --node-rank when a DP rank spans nodes.
+            # Otherwise only headless nodes need start-rank; on an API node
+            # this option would switch vLLM to hybrid load balancing.
+            lines.append('    HEADLESS_ARGS+=(--data-parallel-start-rank "$START_RANK")')
+        lines += ["    ;;", "esac"]
 
     base_args: list[str | list[str]] = [
         "vllm",
         "serve",
         shlex.quote(spec.model.id),
-        [
-            "--port",
-            str(ports.backend[0])
-            if multi_port_external_dp or single_rank
-            else "$PORT",
-        ],
+        ["--port", str(ports.backend[0])],
         ["--tensor-parallel-size", str(layout.tp_world_size)],
     ]
     if layout.pp_world_size > 1:
         base_args.append(["--pipeline-parallel-size", str(layout.pp_world_size)])
-    if not multi_port_external_dp:
-        device_ids = (
-            ",".join(str(index) for index in range(layout.model_parallel_local_size))
-            if single_rank
-            else "$GPUS"
-        )
+    if not role.parallelism.dp_enabled and not respect_visible_devices:
+        device_ids = ",".join(str(index) for index in range(layout.gpus_per_node))
         base_args[3:3] = [["--device-ids", device_ids]]
     if role.parallelism.ep:
         base_args.append("--enable-expert-parallel")
-    if layout.cross_node_model_parallel:
+    if layout.nodes_per_dp_rank > 1:
         base_args += [
             ["--nnodes", str(role.lws.size)],
             ["--node-rank", "$LWS_WORKER_INDEX"],
             ["--master-addr", '"${LWS_LEADER_ADDRESS}"'],
-            '"${HEADLESS_ARGS[@]}"',
         ]
-    if distributed_dp:
+    if role.parallelism.dp_enabled:
+        dp_address = '"${LWS_LEADER_ADDRESS}"' if layout.node_count > 1 else "127.0.0.1"
         base_args += [
             ["--data-parallel-size", "$DP_SIZE"],
-            ["--data-parallel-size-local", "1"],
-            ["--data-parallel-address", '"${LWS_LEADER_ADDRESS}"'],
-            ["--data-parallel-rpc-port", "5555"],
-        ]
-        if external_dp:
-            base_args.append("--data-parallel-external-lb")
-    elif multi_port_external_dp:
-        dp_address = "${LWS_LEADER_ADDRESS}" if role.lws.size > 1 else "127.0.0.1"
-        base_args += [
-            ["--data-parallel-size", "$DP_SIZE"],
-            ["--data-parallel-start-rank", "$START_RANK"],
             ["--data-parallel-size-local", "$DP_SIZE_LOCAL"],
             ["--data-parallel-address", dp_address],
             ["--data-parallel-rpc-port", "5555"],
-            "--data-parallel-multi-port-external-lb",
-            ["--data-parallel-supervisor-port", "8100"],
         ]
-    elif role.parallelism.dp_enabled:
-        dp_address = "${LWS_LEADER_ADDRESS}" if role.lws.size > 1 else "127.0.0.1"
-        base_args += [
-            ["--data-parallel-size", "$DP_SIZE"],
-            ["--data-parallel-rank", "$RANK"],
-            ["--data-parallel-size-local", "1"],
-            ["--data-parallel-address", dp_address],
-            ["--data-parallel-rpc-port", "5555"],
-        ]
+        if multi_port_external_dp:
+            base_args += [
+                ["--data-parallel-start-rank", "$START_RANK"],
+                "--data-parallel-multi-port-external-lb",
+                ["--data-parallel-supervisor-port", "8100"],
+            ]
+        elif external_dp:
+            if layout.nodes_per_dp_rank > 1:
+                base_args.append("--data-parallel-external-lb")
+            else:
+                base_args.append(["--data-parallel-rank", "$START_RANK"])
     if role.kv_transfer_config:
         base_args.append(["--kv_transfer_config", shlex.quote(json.dumps(role.kv_transfer_config, separators=(",", ":")))])
     if spec.model.revision:
         base_args.append(["--revision", shlex.quote(spec.model.revision)])
     if spec.model.served_name:
         base_args.append(["--served-model-name", shlex.quote(spec.model.served_name)])
-    for name, value in (vllm_args or role.vllm_args).items():
+    for name, value in resolved.vllm_args.items():
         if arg := _format_arg(name, value):
             base_args.append(arg)
-    base_args.extend(vllm_raw_args if vllm_raw_args is not None else role.vllm_raw_args)
+    base_args.extend(resolved.vllm_raw_args)
+    if headless_workers:
+        # Headless nodes cannot host API servers, even when the role configures
+        # a positive count. Apply node-specific flags after the role's options.
+        base_args.append('${HEADLESS_ARGS[@]+"${HEADLESS_ARGS[@]}"}')
 
-    if single_rank:
-        if lines[-1]:
-            lines.append("")
-        lines += _command_lines([*(() if cleanup_cache else ("exec",)), *base_args])
-        return "\n".join(lines)
-
-    if multi_port_external_dp:
+    if lines[-1]:
         lines.append("")
-        if persistent_cache:
-            lines += [
-                f"FLASH_ATTENTION_CUTE_DSL_CACHE_DIR=${{FLASH_ATTENTION_CUTE_DSL_CACHE_DIR}}/{role.name} \\",
-                f"TILELANG_CACHE_DIR=${{TILELANG_CACHE_DIR}}/{role.name} \\",
-            ]
-        lines += _command_lines([*(() if cleanup_cache else ("exec",)), *base_args])
-        return "\n".join(lines)
-
-    lines += [
-        "",
-        "for R in $(seq 0 $((DP_SIZE_LOCAL - 1))); do",
-        f"  GPU_START=$((R * {layout.model_parallel_local_size}))",
-        f"  GPUS=$(seq -s, $GPU_START $((GPU_START + {layout.model_parallel_local_size} - 1)))",
-        "  RANK=$((START_RANK + R))",
-        f"  PORTS=({' '.join(str(port) for port in ports.backend)})",
-        "  PORT=${PORTS[$R]}",
-    ]
-
-    if persistent_cache:
+    if multi_port_external_dp and persistent_cache:
         lines += [
-            "  VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT}/rank${RANK} \\",
-            "  FLASHINFER_CACHE_DIR=${FLASHINFER_CACHE_DIR}/rank${RANK} \\",
-            f"  FLASH_ATTENTION_CUTE_DSL_CACHE_DIR=${{FLASH_ATTENTION_CUTE_DSL_CACHE_DIR}}/{role.name}_rank${{RANK}} \\",
-            f"  TILELANG_CACHE_DIR=${{TILELANG_CACHE_DIR}}/{role.name}_rank${{RANK}} \\",
+            f"FLASH_ATTENTION_CUTE_DSL_CACHE_DIR=${{FLASH_ATTENTION_CUTE_DSL_CACHE_DIR}}/{role.name} \\",
+            f"TILELANG_CACHE_DIR=${{TILELANG_CACHE_DIR}}/{role.name} \\",
         ]
-    lines += [
-        *_command_lines([*base_args, "&"], indent="  "),
-        "done",
-        "",
-        "wait -n",
-        "kill $(jobs -p) 2>/dev/null || true",
-        "exit 1",
-    ]
+    # vLLM starts local DP engines and assigns their devices. Preserve the
+    # scheduler/container GPU visibility instead of slicing it in a shell loop.
+    lines += _command_lines([*(() if cleanup_cache else ("exec",)), *base_args])
     return "\n".join(lines)

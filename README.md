@@ -1,6 +1,6 @@
 # Manifesto
 
-Manifesto renders shareable Kubernetes manifests for LLM deployments.
+Manifesto renders shareable Kubernetes manifests and Slurm batch scripts for LLM deployments.
 
 It is built for the workflow where an engineer wants to describe a concrete vLLM
 deployment, render plain YAML, inspect or hand-edit it, and then apply exactly
@@ -27,6 +27,10 @@ It emits raw Kubernetes manifests:
 - standalone Envoy routing by default, or optional Gateway API objects
 - per-pod monitoring sidecars
 - instance-scoped names, labels, selectors, and cache paths
+
+For Slurm profiles, it emits self-contained `sbatch` scripts for direct vLLM
+serving. See [Slurm](#slurm) for runtime choices, remote submission, and supported
+topologies.
 
 The rendered YAML starts with provenance comments:
 
@@ -233,7 +237,7 @@ with LeaderWorkerSet rather than Deployment. Multi-node roles cannot select
 Deployment.
 
 For example, this runs one TP2 × PP2 engine across four GPUs. Increase
-`lws.size` and divide those model-parallel GPUs evenly across pods to span
+`lws.size` and divide those four GPUs evenly across pods to span
 nodes; Manifesto renders the native vLLM node-rank and headless-worker flags.
 
 ```yaml
@@ -242,6 +246,13 @@ roles:
     lws: {size: 1}
     parallelism: {tp: 2, pp: 2, dp: false}
 ```
+
+Manifesto derives where DP ranks sit and which nodes host HTTP endpoints.
+Each DP rank uses `tp × pp` GPUs and either fits on one node or spans whole
+nodes. With internal DP load balancing, node 0 hosts the HTTP endpoint. With
+external DP load balancing, each DP rank exposes an endpoint on its first
+node. Launch scripts, readiness checks, routing, and idle shutdown use this
+same endpoint placement.
 
 Configure PP only through `parallelism.pp`. Manifesto rejects
 `pipeline_parallel_size` in `vllm:`, computed vLLM arguments, or
@@ -514,6 +525,11 @@ pod_defaults:
 A dedicated model-server ServiceAccount is generated only when an OpenShift
 SCC must be bound to it.
 
+Set `pod_defaults.ephemeral_storage` in a Kubernetes cluster profile to request
+and limit scratch storage for each model container. A role's explicit
+`resources.ephemeral_storage` overrides this default. This setting also sizes
+the pod-local JIT cache when one is used.
+
 Cluster profiles own environment that should not be repeated in every model
 spec:
 
@@ -722,7 +738,8 @@ cache:
 ```
 
 For Deployment model pods, writable JIT caches live on a size-limited pod
-`emptyDir` (using the role's `ephemeral_storage` value, or 32Gi by default).
+`emptyDir` (using the role's `ephemeral_storage`, then the cluster's
+`pod_defaults.ephemeral_storage`, or 32Gi if neither is configured).
 They survive container restarts and disappear when Kubernetes removes the pod,
 so rollouts do not leave old cache directories on the persistent filesystem.
 The Hugging Face model cache remains on the configured shared or host volume.
@@ -754,6 +771,126 @@ logging:
 The rendered pods tee logs to `{root}/{role}`, for example
 `/mnt/shared/<user>/logs/decode` and `/mnt/shared/<user>/logs/prefill`.
 
+## Slurm
+
+Select `platform: slurm` in a cluster profile. Start with
+[`clusters/example-slurm.yaml`](clusters/example-slurm.yaml) for
+Apptainer/Singularity. Copy the profile into your private cluster catalog and
+set its partition, GPU type, runtime, and filesystem paths.
+
+Use the same model spec for either platform. The cluster profile selects the
+backend and default accelerator; the shared Qwen example has no platform-specific
+variant. For example, only `--cluster` changes here:
+
+```bash
+manifesto render manifest models/qwen/qwen3-0.6b.yaml --cluster example-stateless-b200
+manifesto render manifest models/qwen/qwen3-0.6b.yaml --cluster example-slurm
+```
+
+To save and submit a batch script:
+
+```bash
+manifesto render slurm models/qwen/qwen3-0.6b.yaml --cluster my-slurm -o qwen.sbatch
+bash -n qwen.sbatch
+sbatch --test-only qwen.sbatch
+sbatch qwen.sbatch
+```
+
+The regular `render manifest`, `render file`, and `deploy` commands also select
+Slurm from the cluster profile. `render file` defaults to `/tmp/manifesto.sbatch`.
+Rendering and `config validate` are offline and need no Kubernetes tools.
+
+The Slurm workflow commands run locally on a login node, or over SSH when the
+profile sets `slurm.ssh_host: user@login-host` (an SSH config alias also works):
+
+```bash
+manifesto slurm submit models/qwen/qwen3-0.6b.yaml --cluster my-slurm --test-only
+manifesto deploy models/qwen/qwen3-0.6b.yaml --cluster my-slurm
+manifesto slurm servers --cluster my-slurm
+manifesto slurm stop 12345 --cluster my-slurm
+manifesto slurm stop 12345_0 --cluster my-slurm  # just one replica
+```
+
+Submission prints the Slurm job ID. Each submit creates a new job, including
+when the release name is unchanged. `servers` lists the authenticated user's
+Manifesto jobs; `--output name` prints job IDs and `--output json` includes state,
+nodes, and scheduling reason. Scheduler validation uses `sbatch --test-only`;
+it does not launch a container or test model compatibility. SSH submission sends
+the complete batch script over stdin and does not install Manifesto remotely.
+SSH authentication must already work without a password prompt.
+
+### Allocation and launch
+
+Slurm currently supports one direct vLLM role with `topology: aggregated` and
+`routing.kind: disabled`. TP, PP, DP, EP, computed arguments, model revision,
+pre-launch hooks, profiling, and existing vLLM environments use the same model
+schema and launch logic as Kubernetes.
+
+| Model setting | Slurm behavior |
+| --- | --- |
+| `lws.size` | Nodes per serving replica, one `srun` task per node |
+| `lws.replicas` | Independent job array elements, each with its own allocation |
+| `parallelism` | GPUs per node derived from `tp × pp × dp ÷ lws.size` |
+| `resources.cpu` | CPUs per task, rounded up to a whole CPU |
+| `resources.memory` | Memory per node, converted to MiB and rounded up |
+| `slurm.time` | Maximum lifetime of each replica |
+
+Each replica uses its first allocated host for rendezvous and prints that
+host's serving URL in the batch log. `srun` propagates failures to the other
+nodes in the replica. Manifesto passes Slurm's `CUDA_VISIBLE_DEVICES` unchanged
+into each container, including noncontiguous device IDs and UUIDs. One vLLM
+launcher per node starts the local DP engines and assigns their devices. For
+DP, vLLM's coordinator manages the group, with the API on the first node and
+headless workers on the remaining nodes. Replicas have separate endpoints;
+Manifesto does not install a load balancer on Slurm.
+
+Cluster accelerator allocation uses `slurm: {gres: gpu}` or a typed value such
+as `slurm: {gres: "gpu:nvidia_gr100"}`. Omit the count; Manifesto derives it.
+`slurm.partition`, `account`, `qos`, and `constraint` map to scheduler options.
+Jobs request exclusive nodes by default because vLLM binds host ports. If you
+disable `slurm.exclusive`, ensure concurrently running jobs use distinct ports.
+
+### Containers, storage, and lifetime
+
+- `slurm.runtime: apptainer` (default) or `singularity` uses `exec --nv --no-eval`.
+  Bare OCI image names get a `docker://` prefix; absolute SIF paths are supported.
+  Use a runtime version supporting `--no-eval`.
+- `slurm.runtime: pyxis` uses `srun --container-image`. Registry-qualified OCI
+  names are converted to Enroot's `REGISTRY#IMAGE` syntax; absolute `.sqsh`
+  paths work directly. The image entrypoint is bypassed so Manifesto starts vLLM.
+- `slurm.runtime: native` uses vLLM from the host or `runtime.vllm_env`.
+- `slurm.binds` contains `{source: /host/path, target: /container/path}` entries
+  with optional `read_only: true`. Paths must exist on every allocated node.
+  An external `runtime.vllm_env` must be covered by a bind when using containers.
+- `slurm.setup` contains trusted shell commands run on the batch host before
+  `srun`, for example loading runtime modules or setting Enroot paths. Model
+  `runtime.pre_launch` and role hooks run inside each serving task instead.
+- Use `cache.hf_home`, `paths.cache_root`, and `paths.log_root` for filesystem
+  caches and logs. Writable compilation caches are isolated by job, array
+  element, and hostname. Slurm also writes stdout/stderr to
+  `manifesto-RELEASE-JOB_ARRAYINDEX.out` in the submission directory.
+- Export `HF_TOKEN` in the submitting environment when needed. Ambient tokens
+  are not embedded in scripts. With SSH, authentication and environment must
+  be configured on the remote login host; local credentials are not forwarded.
+
+For Rubin, select an ARM64 image built for the GPU and driver, such as an
+appropriate CUDA 13.4 vLLM build. The generic model example's standard image is
+not a promise of Rubin compatibility. Enroot extraction needs filesystem
+features such as extended attributes; use node-local temporary/data paths when
+the shared home filesystem is NFS.
+See the [vLLM Rubin image guidance](https://docs.vllm.ai/en/latest/deployment/docker/)
+and [Pyxis runtime options](https://github.com/NVIDIA/pyxis#usage).
+
+Kubernetes sidecars and idle shutdown are omitted when left at implicit
+defaults. Explicitly requesting them raises an error. Kubernetes pod storage
+defaults belong in the cluster's `pod_defaults`, so the model needs no Slurm
+variant or lifecycle overrides.
+P/D routing, Kubernetes workload overrides, PVCs, Kueue, DRA, and Kubernetes
+ephemeral-storage/shared-memory requests are unsupported. Use Slurm wall time
+and `slurm stop` for lifecycle control. `ready`, `test e2e`, and `file apply/diff`
+remain Kubernetes commands; inspect a Slurm endpoint with `/health` and submit
+saved scripts with `sbatch`.
+
 ## Manual Manifest Workflow
 
 The file workflow is the preferred path when you want to share or tweak exactly
@@ -774,6 +911,26 @@ The low-level `manifesto render manifest` command performs no cluster I/O when p
 explicit `--cluster` and `--namespace` (or with `MANIFESTO_NAMESPACE` set).
 Workflow commands such as `deploy`, `ready`, `file diff`, and `file apply` are the
 cluster-touching commands.
+
+### Python rendering API
+
+`manifesto.render.render()` returns ready-to-write text: Kubernetes YAML or a
+Slurm batch script, selected by `cluster.platform`.
+
+```python
+from manifesto.cluster import load_cluster
+from manifesto.render import render
+from manifesto.spec import load_spec
+
+cluster = load_cluster("clusters/example-slurm.yaml")
+spec = load_spec("models/qwen/qwen3-0.6b.yaml", cluster)
+artifact = render(spec, user="tester", cluster=cluster)
+```
+
+Python callers that need Kubernetes object dictionaries should use
+`render_kubernetes()`; `render_to_yaml()` serializes those objects. Existing
+callers that used `render()` for an object list should switch to
+`render_kubernetes()`.
 
 ## Lifecycle Commands
 
@@ -912,6 +1069,10 @@ Local tools:
 - `uv`
 - `kubectl`
 
+Slurm workflows use `sbatch`, `srun`, `squeue`, `scontrol`, and `scancel` on the
+login host. With `slurm.ssh_host`, only `ssh` is needed locally alongside
+Manifesto; Kubernetes tools are unnecessary.
+
 Expected `.env` values:
 
 ```bash
@@ -942,6 +1103,8 @@ It is a client-side renderer:
 
 ```text
 model spec + cluster profile + user -> raw Kubernetes YAML
+                                  -> Slurm batch script
 ```
 
-The YAML is the artifact. Inspect it, edit it, share it, apply it.
+The rendered file is the artifact. Inspect it, edit it, share it, then apply
+the YAML or submit the batch script.

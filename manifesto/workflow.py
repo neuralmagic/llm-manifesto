@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -120,13 +120,33 @@ class RuntimeConfig:
     cluster_path: str | None
     render_out: Path
     context: str | None = None
+    platform: str = "kubernetes"
+    loaded_cluster: Cluster | None = field(default=None, repr=False, compare=False)
 
     @classmethod
     def from_args(cls, args, *, require_cluster: bool = True) -> "RuntimeConfig":
         load_dotenv()
         user = resolve_user(getattr(args, "user", None))
         context = getattr(args, "context", None)
-        namespace = resolve_namespace(getattr(args, "namespace", None), context=context)
+        # An explicit Slurm profile must never require kubectl, even to choose
+        # defaults. Keep Kubernetes context discovery for Kubernetes commands.
+        # Saved-file and stateless Kubernetes commands do not need the ambient
+        # model cluster profile. Still honor a profile explicitly passed to an
+        # optional-profile command such as ready or stop.
+        explicit_cluster = getattr(args, "cluster", None)
+        if require_cluster and not explicit_cluster:
+            explicit_cluster = os.environ.get("MANIFESTO_CLUSTER")
+        selected = (
+            load_cluster_with_overrides(resolve_catalog_path(explicit_cluster, "clusters"), args)
+            if explicit_cluster else None
+        )
+        is_slurm = selected is not None and selected.platform == "slurm"
+        if is_slurm and (context or getattr(args, "namespace", None)):
+            raise WorkflowError("Slurm does not use --context or --namespace", code=2)
+        namespace = (
+            "default" if is_slurm
+            else resolve_namespace(getattr(args, "namespace", None), context=context)
+        )
         cluster_path = (
             resolve_cluster(getattr(args, "cluster", None), context=context)
             if require_cluster
@@ -134,7 +154,9 @@ class RuntimeConfig:
         )
         render_out = Path(
             getattr(args, "output", None)
-            or os.environ.get("MANIFESTO_RENDER_OUT", "/tmp/manifesto.yaml")
+            or os.environ.get(
+                "MANIFESTO_RENDER_OUT", "/tmp/manifesto.sbatch" if is_slurm else "/tmp/manifesto.yaml"
+            )
         )
         return cls(
             user=user,
@@ -142,9 +164,16 @@ class RuntimeConfig:
             cluster_path=cluster_path,
             render_out=render_out,
             context=context,
+            platform="slurm" if is_slurm else "kubernetes",
+            loaded_cluster=selected,
         )
 
     def kubectl_base(self) -> list[str]:
+        if self.platform == "slurm":
+            raise WorkflowError(
+                "This command requires Kubernetes; use manifesto slurm servers/stop for Slurm jobs",
+                code=2,
+            )
         command = ["kubectl"]
         if self.context:
             command.extend(["--context", self.context])
@@ -355,6 +384,8 @@ def resolve_cluster(explicit: str | None = None, *, context: str | None = None) 
 
 
 def load_runtime_cluster(config: RuntimeConfig, args):
+    if config.loaded_cluster is not None:
+        return config.loaded_cluster
     if not config.cluster_path:
         raise WorkflowError("No cluster profile configured.", code=2)
     return load_cluster_with_overrides(config.cluster_path, args)
@@ -375,8 +406,9 @@ def apply_runtime_overrides(spec, args, config: RuntimeConfig) -> None:
     if getattr(args, "vllm_env", None) is not None:
         spec.runtime.vllm_env = args.vllm_env
     if getattr(args, "idle_timeout_minutes", None) is not None:
-        spec.runtime.idle_shutdown.enabled = True
-        spec.runtime.idle_shutdown.timeout_minutes = args.idle_timeout_minutes
+        spec.runtime.idle_shutdown = spec.runtime.idle_shutdown.model_copy(
+            update={"enabled": True, "timeout_minutes": args.idle_timeout_minutes}
+        )
     if getattr(args, "no_idle_shutdown", False):
         spec.runtime.idle_shutdown.enabled = False
     spec.runtime.pre_launch.extend(getattr(args, "pre_launch", None) or [])
@@ -409,8 +441,11 @@ def render_manifest(
         accelerator=getattr(args, "accelerator", None),
     )
     apply_runtime_overrides(spec, args, config)
-    return render_to_yaml(
-        render(spec, user=config.user, cluster=cluster, routing_only=routing_only),
+    return render(
+        spec,
+        user=config.user,
+        cluster=cluster,
+        routing_only=routing_only,
         header=manifest_header(
             args,
             config,
@@ -529,9 +564,13 @@ def manifest_header(
         header.append(f"    {shlex.join(options)}")
     header.extend(
         [
-            "To set identity or placement, append --user USER and/or --namespace NAMESPACE.",
+            (
+                "To set identity, append --user USER."
+                if cluster.platform == "slurm"
+                else "To set identity or placement, append --user USER and/or --namespace NAMESPACE."
+            ),
             f"Source: {SOURCE_REPOSITORY}/tree/{revision}",
-            "Safe to edit before applying.",
+            "Safe to edit before submitting." if cluster.platform == "slurm" else "Safe to edit before applying.",
         ]
     )
     return header
@@ -553,9 +592,13 @@ def deploy(
 ) -> int:
     config = config or RuntimeConfig.from_args(args)
     manifest = render_manifest(args, config, routing_only=routing_only, cluster=cluster)
+    if config.platform == "slurm" or (cluster is not None and cluster.platform == "slurm"):
+        from .slurm import submit
+
+        return submit(manifest, cluster=cluster or load_runtime_cluster(config, args))
+    objects = parse_manifest(manifest)
     if not routing_only:
         require_hf_token()
-        objects = parse_manifest(manifest)
         preflight_workloads(config, objects)
         transitions = plan_workload_transitions(config, objects)
         rc = sync_hf_secret(config)
@@ -567,7 +610,6 @@ def deploy(
     rc = run([*config.kubectl(), "apply", "-f", "-"], input_text=manifest)
     if rc:
         return rc
-    objects = parse_manifest(manifest)
     return cleanup_obsolete_routing(config, objects)
 
 
@@ -1233,9 +1275,12 @@ def stop(args) -> int:
     if args.spec:
         spec = load_spec(resolve_model(args.spec))
         cluster_path = getattr(args, "cluster", None) or os.environ.get("MANIFESTO_CLUSTER")
-        include_user_in_name = (
-            load_cluster(resolve_cluster(cluster_path)).naming.user_prefix if cluster_path else False
-        )
+        cluster = config.loaded_cluster
+        if cluster is None and cluster_path:
+            cluster = load_cluster(resolve_cluster(cluster_path))
+        if cluster is not None and cluster.platform == "slurm":
+            raise WorkflowError("Use manifesto slurm stop JOB_ID to stop Slurm jobs", code=2)
+        include_user_in_name = cluster.naming.user_prefix if cluster is not None else False
         instance_id = Instance(
             user=config.user,
             release=spec.release,

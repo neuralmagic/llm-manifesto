@@ -20,7 +20,7 @@ DEFAULT_VLLM_ARGS: dict[str, Any] = {
     "disable_access_log_for_endpoints": "/health,/v1/models,/metrics",
 }
 POD_CACHE_MOUNT = "/var/cache/manifesto-pod"
-POD_CACHE_DIRS = {
+CACHE_DIRS = {
     "HOME": "home",
     "XDG_CACHE_HOME": "xdg",
     "VLLM_CACHE_ROOT": "vllm",
@@ -35,6 +35,8 @@ POD_CACHE_DIRS = {
 
 @dataclass(frozen=True)
 class ResolvedRole:
+    workload_name: str
+    layout: ParallelLayout
     ports: RolePorts
     log_dir: str | None
     trace_dir: str | None
@@ -48,14 +50,24 @@ class ResolvedRole:
     vllm_raw_args: list[str]
     resource_claims: list[dict[str, str]]
 
+    @property
+    def api_nodes(self) -> tuple[int, ...]:
+        """Nodes hosting HTTP endpoints within one serving replica.
+
+        Internal load balancing has one entrypoint. External load balancing
+        exposes each DP rank on the first node holding its TP/PP workers.
+        """
+        if self.features.external_dp:
+            return tuple(range(0, self.layout.node_count, self.layout.nodes_per_dp_rank))
+        return (0,)
+
+    @property
+    def has_headless_nodes(self) -> bool:
+        return len(self.api_nodes) < self.layout.node_count
+
 
 def resolve_role(spec: DeploymentSpec, instance: Instance, cluster: Cluster, role: RoleSpec) -> ResolvedRole:
     layout = parallel_layout(role)
-    ports = derive_ports(
-        rank_count=layout.dp_local_size,
-        public_base=role.serving_port_base,
-        backend_base=role.backend_port_base,
-    )
     context = _variable_context(spec, role, layout)
     computed_env = render_mapping(role.computed.get("env", {}), context)
     context |= computed_env
@@ -138,17 +150,28 @@ def resolve_role(spec: DeploymentSpec, instance: Instance, cluster: Cluster, rol
             explicit_env=frozenset(env),
         )
     )
-    if cache_prefix and features.workload_kind == WorkloadKind.DEPLOYMENT:
+    ports = derive_ports(
+        rank_count=layout.dp_local_size if features.external_dp else 1,
+        public_base=role.serving_port_base,
+        backend_base=role.backend_port_base,
+    )
+    if cache_prefix and cluster.platform != "slurm" and features.workload_kind == WorkloadKind.DEPLOYMENT:
         pod_cache_root = (
             f"{POD_CACHE_MOUNT}/jit-cache/"
             f"{spec.accelerator_config(cluster).gpu_arch}/{spec.cache.cuda}/"
             f"{spec.cache_key}/{instance.release_slug}"
         )
-        for name, directory in POD_CACHE_DIRS.items():
+        for name, directory in CACHE_DIRS.items():
             env[name] = f"{pod_cache_root}/{directory}"
             env_provenance[name] = "manifesto:pod cache"
 
     return ResolvedRole(
+        workload_name=(
+            instance.user_scoped_name(role.workload_name)
+            if role.workload_name
+            else instance.name(role.name)
+        ),
+        layout=layout,
         ports=ports,
         log_dir=log_dir,
         trace_dir=trace_dir,
@@ -180,8 +203,11 @@ def _variable_context(spec: DeploymentSpec, role: RoleSpec, layout: ParallelLayo
         "tp_local_size": layout.tp_local_size,
         "pp": layout.pp_world_size,
         "pp_world_size": layout.pp_world_size,
-        "model_parallel_local_size": layout.model_parallel_local_size,
-        "model_parallel_world_size": layout.model_parallel_world_size,
+        "gpus_per_dp_rank": layout.gpus_per_dp_rank,
+        "nodes_per_dp_rank": layout.nodes_per_dp_rank,
+        # Retain existing equation names for compatibility with saved specs.
+        "model_parallel_local_size": min(layout.gpus_per_dp_rank, layout.gpus_per_node),
+        "model_parallel_world_size": layout.gpus_per_dp_rank,
         "dp_enabled": role.parallelism.dp_enabled,
         "dp_local_size": layout.dp_local_size,
         "dp_world_size": layout.dp_world_size,
@@ -204,18 +230,8 @@ def _base_env(
     if spec.model.hf_home:
         env["HF_HOME"] = spec.model.hf_home
     if cache_prefix:
-        env |= {
-            "HOME": f"{cache_prefix}/home",
-            "XDG_CACHE_HOME": f"{cache_prefix}/xdg",
-            "VLLM_CACHE_ROOT": f"{cache_prefix}/vllm",
-            "FLASHINFER_CACHE_DIR": f"{cache_prefix}/flashinfer",
-            "FLASHINFER_WORKSPACE_BASE": f"{cache_prefix}/flashinfer-workspace",
-            "FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED": "1",
-            "FLASH_ATTENTION_CUTE_DSL_CACHE_DIR": f"{cache_prefix}/fa-cute-dsl",
-            "TRITON_CACHE_DIR": f"{cache_prefix}/triton",
-            "TORCHINDUCTOR_CACHE_DIR": f"{cache_prefix}/torchinductor",
-            "TILELANG_CACHE_DIR": f"{cache_prefix}/tilelang",
-        }
+        env |= {name: f"{cache_prefix}/{directory}" for name, directory in CACHE_DIRS.items()}
+        env["FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED"] = "1"
     if vllm_env:
         env["MANIFESTO_VLLM_ENV"] = vllm_env
     if platform == "openshift":
@@ -229,6 +245,14 @@ def _validate_vllm_env_path(vllm_env: str, cluster: Cluster) -> None:
     path = PurePosixPath(posixpath.normpath(vllm_env))
     if not path.is_absolute():
         raise ValueError("runtime.vllm_env must be an absolute path")
+    if cluster.platform == "slurm":
+        assert cluster.slurm is not None
+        if cluster.slurm.runtime == "native":
+            return
+        mount_paths = [PurePosixPath(bind.target) for bind in cluster.slurm.binds]
+        if not any(path.is_relative_to(mount) for mount in mount_paths):
+            raise ValueError("runtime.vllm_env must be covered by slurm.binds")
+        return
     mount_paths = [PurePosixPath(mount["mountPath"]) for mount in cluster.volume_mounts()]
     if not any(path == mount or path.is_relative_to(mount) for mount in mount_paths):
         rendered = ", ".join(str(mount) for mount in mount_paths)

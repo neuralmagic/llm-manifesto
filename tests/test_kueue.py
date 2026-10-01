@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from manifesto.cluster import KueueConfig, load_cluster
 from manifesto.e2e import render_probe_job
 from manifesto.instance import Instance
-from manifesto.render import render
+from manifesto.render import render_kubernetes
 from manifesto.render.lws import KUEUE_QUEUE_LABEL
 from manifesto.spec import load_spec
 
@@ -22,7 +22,7 @@ def _render(model: str, *, queue: str | None) -> list[dict]:
     cluster = load_cluster(CLUSTER_PATH)
     cluster.kueue.local_queue = queue
     spec = load_spec(ROOT / "models" / model, cluster)
-    return render(spec, user="tester", cluster=cluster)
+    return render_kubernetes(spec, user="tester", cluster=cluster)
 
 
 def _lws_pod_spec(workload: dict) -> dict:
@@ -150,7 +150,7 @@ def test_single_node_role_can_use_lws_queue_admission():
     spec = load_spec(ROOT / "models" / "qwen/aggregated.yaml", cluster)
     spec.role("decode").workload = "leaderworkerset"
 
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
 
     workload = _find(objects, "LeaderWorkerSet", "decode")
     assert workload["metadata"]["labels"][KUEUE_QUEUE_LABEL] == QUEUE
@@ -172,7 +172,7 @@ def test_single_node_pd_roles_remain_independently_admitted_deployments():
         for role in spec.roles:
             role.lws.size = 1
             role.parallelism.dp = 4
-        renders[queue] = render(spec, user="tester", cluster=cluster)
+        renders[queue] = render_kubernetes(spec, user="tester", cluster=cluster)
 
     queued = renders[QUEUE]
     unqueued = renders[None]
@@ -219,7 +219,7 @@ def test_zero_gpu_native_lws_is_unqueued_and_omits_accelerator_resources():
     cluster.kueue.local_queue = QUEUE
     spec = load_spec(ROOT / "models" / "kimi-k3/aggregated-tp16-ep16.yaml", cluster)
     spec.role("decode").resources.gpus = 0
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
     lws = next(obj for obj in objects if obj["kind"] == "LeaderWorkerSet")
     vllm = next(
         container
@@ -237,7 +237,7 @@ def test_zero_gpu_native_deployment_is_unqueued_and_omits_accelerator_resources(
     cluster.kueue.local_queue = QUEUE
     spec = load_spec(ROOT / "models" / "qwen/aggregated.yaml", cluster)
     spec.role("decode").resources.gpus = 0
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
     deployment = _find(objects, "Deployment", "decode")
     vllm = deployment["spec"]["template"]["spec"]["containers"][0]
 

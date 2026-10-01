@@ -9,8 +9,7 @@ from ..cluster import Cluster
 from ..features import WorkloadKind
 from ..images import DEFAULT_IMAGES
 from ..instance import Instance
-from ..parallelism import parallel_layout
-from ..resolve import resolve_role
+from ..resolve import ResolvedRole
 from ..spec import DeploymentSpec, RoutingFrontend, RoutingKind
 from .routing import gateway_name
 
@@ -215,6 +214,7 @@ def render_idle_shutdown(
     spec: DeploymentSpec,
     instance: Instance,
     cluster: Cluster,
+    resolved_roles: dict[str, ResolvedRole],
 ) -> list[dict]:
     """Render a small controller that watches vLLM request metrics instance-wide."""
     if not spec.runtime.idle_shutdown.enabled or not spec.roles:
@@ -235,54 +235,32 @@ def render_idle_shutdown(
     targets: dict[str, dict] = {}
     expected_targets = 0
     for role in spec.roles:
-        workload_name = (
-            instance.user_scoped_name(role.workload_name)
-            if role.workload_name
-            else instance.name(role.name)
-        )
-        resolved = resolve_role(spec, instance, cluster, role)
-        layout = parallel_layout(role)
-        serving_worker_indices = (
-            layout.serving_worker_indices
-            if layout.cross_node_model_parallel and resolved.features.external_dp
-            else (0,)
-        )
+        resolved = resolved_roles[role.name]
+        workload_name = resolved.workload_name
         targets[instance.labels(role=role.name)["llm-d.ai/role"]] = {
             "ports": list(resolved.ports.backend),
             "worker_indices": (
-                [str(index) for index in serving_worker_indices]
-                if layout.cross_node_model_parallel
+                [str(node) for node in resolved.api_nodes]
+                if resolved.has_headless_nodes
                 else None
             ),
         }
-        serving_pods_per_replica = (
-            len(serving_worker_indices)
-            if layout.cross_node_model_parallel
-            else role.lws.size
-        )
         expected_targets += (
-            role.lws.replicas
-            * serving_pods_per_replica
-            * len(resolved.ports.backend)
+            role.lws.replicas * len(resolved.api_nodes) * len(resolved.ports.backend)
         )
         if resolved.features.workload_kind == WorkloadKind.DEPLOYMENT:
             deployment_names.append(workload_name)
-            model_workloads.append(
-                {
-                    "name": workload_name,
-                    "path": f"/apis/apps/v1/namespaces/{spec.namespace}/deployments/{workload_name}",
-                    "replicas": role.lws.replicas,
-                }
-            )
+            api_group, resource = "apps/v1", "deployments"
         else:
             lws_names.append(workload_name)
-            model_workloads.append(
-                {
-                    "name": workload_name,
-                    "path": f"/apis/leaderworkerset.x-k8s.io/v1/namespaces/{spec.namespace}/leaderworkersets/{workload_name}",
-                    "replicas": role.lws.replicas,
-                }
-            )
+            api_group, resource = "leaderworkerset.x-k8s.io/v1", "leaderworkersets"
+        model_workloads.append(
+            {
+                "name": workload_name,
+                "path": f"/apis/{api_group}/namespaces/{spec.namespace}/{resource}/{workload_name}",
+                "replicas": role.lws.replicas,
+            }
+        )
     workloads = model_workloads
     gateway: dict[str, str] | None = None
     if spec.routing.kind != RoutingKind.DISABLED:

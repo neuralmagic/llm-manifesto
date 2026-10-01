@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from manifesto.cluster import load_cluster
 from manifesto.instance import Instance
 from manifesto.parallelism import parallel_layout
-from manifesto.render import render
+from manifesto.render import render_kubernetes
 from manifesto.resolve import resolve_role
 from manifesto.spec import DeploymentSpec, DpLoadBalancing, RoleSpec, RoutingKind, load_spec
 
@@ -130,7 +130,7 @@ def test_equations_get_explicit_dp_scopes():
     assert resolved.env["DP_WORLD"] == "8"
 
 
-def test_equations_get_pipeline_and_model_parallel_scopes():
+def test_equations_expose_dp_placement_and_preserve_legacy_names():
     spec = load_spec(ROOT / "models" / "qwen" / "aggregated.yaml", CLUSTER)
     role = spec.role("decode")
     role.parallelism.tp = 2
@@ -138,6 +138,8 @@ def test_equations_get_pipeline_and_model_parallel_scopes():
     role.resources.gpus = 4
     role.computed["env"] = {
         "PP_WORLD": "pp_world_size",
+        "RANK_GPUS": "gpus_per_dp_rank",
+        "RANK_NODES": "nodes_per_dp_rank",
         "MODEL_PARALLEL_LOCAL": "model_parallel_local_size",
         "MODEL_PARALLEL_WORLD": "model_parallel_world_size",
     }
@@ -145,6 +147,8 @@ def test_equations_get_pipeline_and_model_parallel_scopes():
     resolved = resolve_role(spec, Instance("tester", spec.release), CLUSTER, role)
 
     assert resolved.env["PP_WORLD"] == "2"
+    assert resolved.env["RANK_GPUS"] == "4"
+    assert resolved.env["RANK_NODES"] == "1"
     assert resolved.env["MODEL_PARALLEL_LOCAL"] == "4"
     assert resolved.env["MODEL_PARALLEL_WORLD"] == "4"
 
@@ -191,7 +195,7 @@ def test_tp8_across_two_pods_derives_four_gpus_per_pod():
     role = spec.role("decode")
     assert role.gpus_per_pod == 4
     assert role.resources.gpus == 4
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     workload = next(obj for obj in objects if obj["kind"] == "LeaderWorkerSet")
     container = workload["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"][
         "containers"
@@ -377,7 +381,7 @@ def test_cluster_path_templates_feed_cache_external_env_and_logs():
     instance = Instance("Tester.Name", spec.release)
 
     resolved = resolve_role(spec, instance, cluster, role)
-    objects = render(spec, user="Tester.Name", cluster=cluster)
+    objects = render_kubernetes(spec, user="Tester.Name", cluster=cluster)
     lws = next(obj for obj in objects if obj["kind"] == "LeaderWorkerSet" and obj["metadata"]["name"].endswith("decode"))
     script = lws["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"]["containers"][0]["args"][0]
 
@@ -406,7 +410,7 @@ def test_openshift_strips_node_exporter_sidecar_and_host_volumes():
     spec = load_spec(ROOT / "models" / "qwen" / "aggregated.yaml", cluster)
     spec.runtime.sidecars = ["dcgm-exporter", "node-exporter"]
 
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
     deployment = next(
         obj
         for obj in objects
@@ -428,7 +432,7 @@ def test_pre_launch_hooks_run_before_rank_launch_setup():
     role = spec.role("decode")
     role.pre_launch.append("echo role-hook")
 
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     lws = next(obj for obj in objects if obj["kind"] == "LeaderWorkerSet" and obj["metadata"]["name"].endswith("decode"))
     script = lws["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"]["containers"][0]["args"][0]
 
@@ -441,7 +445,7 @@ def _system_vllm_python_setup() -> str:
     spec = load_spec(DEEPSEEK, CLUSTER)
     spec.runtime.pre_launch.append('python -c "import vllm"')
 
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     lws = next(
         obj
         for obj in objects
@@ -527,7 +531,7 @@ def test_python_vllm_shebang_selects_its_interpreter(tmp_path, env_shebang):
 
 def test_launch_without_hooks_does_not_require_python_resolution():
     spec = load_spec(DEEPSEEK, CLUSTER)
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     lws = next(
         obj
         for obj in objects

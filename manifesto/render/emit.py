@@ -1,4 +1,4 @@
-"""Top-level render pipeline that emits one YAML-ready object list per deployment."""
+"""Kubernetes object rendering and YAML serialization."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from .lws import render_accelerator_claim_template, render_workload
 from .routing import render_routing
 from ..cluster import Cluster
 from ..instance import Instance
-from ..parallelism import parallel_layout
 from ..resolve import resolve_role
 from ..spec import DeploymentSpec
 
@@ -38,50 +37,53 @@ def _literal_multiline_strings(value):
     return value
 
 
-def render(
+def render_kubernetes(
     spec: DeploymentSpec,
     *,
     user: str,
     cluster: Cluster,
     routing_only: bool = False,
 ) -> list[dict]:
+    if cluster.platform == "slurm":
+        raise ValueError("render_kubernetes requires a Kubernetes or OpenShift cluster profile")
     instance = Instance(
         user=user,
         release=spec.release,
         include_user_in_name=cluster.naming.user_prefix,
     )
-    if routing_only:
-        return [
-            *render_idle_shutdown(spec, instance, cluster),
-            *render_routing(spec, instance, cluster),
-        ]
-
+    resolved_roles = {
+        role.name: resolve_role(spec, instance, cluster, role) for role in spec.roles
+    }
     objects = []
-    if cluster.openshift.scc:
-        objects.append(render_service_account(instance))
-        objects.append(
-            render_openshift_scc_binding(instance, namespace=spec.namespace, scc=cluster.openshift.scc)
-        )
-    if spec.roles and "dcgm-exporter" in spec.runtime.sidecars:
-        objects.append(render_dcgm_metrics_configmap(instance))
-    for role in spec.roles:
-        claim_template = render_accelerator_claim_template(
-            spec, instance, cluster, role
-        )
-        if claim_template is not None:
-            objects.append(claim_template)
-        objects.append(render_workload(spec, instance, cluster, role))
-        resolved = resolve_role(spec, instance, cluster, role)
-        objects.append(
-            render_model_server_service(
-                instance,
-                role.name,
-                resolved.ports,
-                leader_only=parallel_layout(role).cross_node_model_parallel,
+    if not routing_only:
+        if cluster.openshift.scc:
+            objects.append(render_service_account(instance))
+            objects.append(
+                render_openshift_scc_binding(instance, namespace=spec.namespace, scc=cluster.openshift.scc)
             )
-        )
-    objects.extend(render_idle_shutdown(spec, instance, cluster))
-    objects.extend(render_routing(spec, instance, cluster))
+        if spec.roles and "dcgm-exporter" in spec.runtime.sidecars:
+            objects.append(render_dcgm_metrics_configmap(instance))
+        for role in spec.roles:
+            resolved = resolved_roles[role.name]
+            claim_template = render_accelerator_claim_template(
+                spec, instance, cluster, role, resolved
+            )
+            if claim_template is not None:
+                objects.append(claim_template)
+            objects.append(render_workload(spec, instance, cluster, role, resolved))
+            objects.append(
+                render_model_server_service(
+                    instance,
+                    role.name,
+                    resolved.ports,
+                    # A Service selector cannot express a list of worker indices.
+                    # Use the leader when some nodes are headless; EPP can route to
+                    # every API node using its endpoint filter.
+                    leader_only=resolved.has_headless_nodes,
+                )
+            )
+    objects.extend(render_idle_shutdown(spec, instance, cluster, resolved_roles))
+    objects.extend(render_routing(spec, instance, cluster, resolved_roles))
     return objects
 
 

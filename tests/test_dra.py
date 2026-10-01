@@ -9,8 +9,9 @@ from pydantic import ValidationError
 from manifesto.cluster import AcceleratorConfig, Cluster
 from manifesto.dra import DRA_CLAIM_NAME
 from manifesto.instance import Instance
-from manifesto.render import render
+from manifesto.render import render_kubernetes
 from manifesto.render.lws import render_workload
+from manifesto.resolve import resolve_role
 from manifesto.spec import load_spec
 from manifesto.workload import (
     JobPolicy,
@@ -103,7 +104,7 @@ def test_serving_workloads_swap_extended_resources_for_dra_claims(
     cluster = _dra_cluster()
     spec = load_spec(ROOT / model, cluster)
     _assert_dra_pair(
-        render(spec, user="tester", cluster=cluster), workload_kind, count
+        render_kubernetes(spec, user="tester", cluster=cluster), workload_kind, count
     )
 
 
@@ -111,7 +112,7 @@ def test_zero_gpu_dra_role_emits_no_template_or_claim():
     cluster = _dra_cluster()
     spec = load_spec(ROOT / "models/qwen/aggregated.yaml", cluster)
     spec.role("decode").resources.gpus = 0
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
     workload = next(
         obj
         for obj in objects
@@ -126,11 +127,10 @@ def test_dra_accelerator_claim_coexists_with_imex_claim():
     cluster = _dra_cluster()
     cluster.fabric.imex_resource_claim_template = "compute-domain-template"
     spec = load_spec(ROOT / "models/qwen/aggregated.yaml", cluster)
+    instance = Instance(user="tester", release=spec.release)
     workload = render_workload(
-        spec,
-        Instance(user="tester", release=spec.release),
-        cluster,
-        spec.roles[0],
+        spec, instance, cluster, spec.roles[0],
+        resolve_role(spec, instance, cluster, spec.roles[0]),
     )
     pod_spec = _pod_spec(workload)
     assert {claim["name"] for claim in pod_spec["resourceClaims"]} == {

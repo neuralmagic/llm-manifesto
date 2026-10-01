@@ -28,6 +28,7 @@ rdma:
 
 pod_defaults:
   shm_size: 2Gi
+  ephemeral_storage: 32Gi
 
 paths:
   user_root: /var/cache/manifesto/{user}

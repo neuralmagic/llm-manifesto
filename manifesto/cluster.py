@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .equations import render_mapping
 from .images import DEFAULT_IMAGES
+from .slurm_config import SlurmAllocationConfig, SlurmConfig
 
 
 class PersistentVolumeClaimConfig(BaseModel):
@@ -99,6 +100,7 @@ class PodDefaults(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     shm_size: str = "2Gi"
+    ephemeral_storage: str | None = None
     dns_policy: Literal["ClusterFirst", "Default", "ClusterFirstWithHostNet", "None"] | None = None
     dns_config: dict[str, Any] = Field(default_factory=dict)
     annotations: dict[str, str] = Field(default_factory=dict)
@@ -173,16 +175,17 @@ class AcceleratorAllocationConfig(BaseModel):
 
     extended_resource: ExtendedResourceAllocationConfig | None = None
     dra: DraAllocationConfig | None = None
+    slurm: SlurmAllocationConfig | None = None
 
     @model_validator(mode="after")
     def require_one_allocation_backend(self) -> "AcceleratorAllocationConfig":
         configured = sum(
-            value is not None for value in (self.extended_resource, self.dra)
+            value is not None for value in (self.extended_resource, self.dra, self.slurm)
         )
         if configured != 1:
             raise ValueError(
                 "accelerator allocation must define exactly one of "
-                "extended_resource or dra"
+                "extended_resource, dra or slurm"
             )
         return self
 
@@ -192,10 +195,16 @@ class AcceleratorConfig(BaseModel):
 
     gpus_per_node: int = Field(ge=1)
     allocation: AcceleratorAllocationConfig
-    presence_label: str
+    presence_label: str = ""
     node_selector: dict[str, str] = Field(default_factory=dict)
     gpu_arch: str
     torch_cuda_arch_list: str
+
+    @model_validator(mode="after")
+    def require_kubernetes_presence_label(self) -> "AcceleratorConfig":
+        if self.allocation.slurm is None and not self.presence_label:
+            raise ValueError("Kubernetes accelerator profiles require presence_label")
+        return self
 
     @property
     def resource_name(self) -> str | None:
@@ -342,7 +351,8 @@ class Cluster(BaseModel):
 
     name: str
     accelerators: AcceleratorsConfig
-    platform: Literal["kubernetes", "openshift"] = "kubernetes"
+    platform: Literal["kubernetes", "openshift", "slurm"] = "kubernetes"
+    slurm: SlurmConfig | None = None
     naming: NamingConfig = Field(default_factory=NamingConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
@@ -355,6 +365,27 @@ class Cluster(BaseModel):
     llm_d: LlmdConfig = Field(default_factory=LlmdConfig)
     openshift: OpenShiftConfig = Field(default_factory=OpenShiftConfig)
     kueue: KueueConfig = Field(default_factory=KueueConfig)
+
+    @model_validator(mode="after")
+    def validate_platform(self) -> "Cluster":
+        is_slurm = self.platform == "slurm"
+        if is_slurm != (self.slurm is not None):
+            raise ValueError("platform: slurm and a slurm configuration must be set together")
+        for accelerator in self.accelerators.profiles.values():
+            if is_slurm != (accelerator.allocation.slurm is not None):
+                raise ValueError("Slurm profiles require allocation.slurm; Kubernetes profiles require extended_resource or dra")
+            if is_slurm and accelerator.node_selector:
+                raise ValueError("Slurm placement uses slurm.constraint, not node_selector")
+        if is_slurm:
+            for field in ("storage", "pod_defaults", "rdma", "openshift", "kueue", "gateway", "llm_d"):
+                value = getattr(self, field)
+                if value != type(value)():
+                    raise ValueError(f"{field} is Kubernetes-only; use Slurm binds and filesystem paths")
+            if self.cache.hf_host_path or self.cache.jit_host_path or self.logging.pvc:
+                raise ValueError("Slurm uses cache.hf_home, paths.cache_root and paths.log_root with slurm.binds")
+            if self.fabric.imex_resource_claim_template:
+                raise ValueError("Slurm does not support Kubernetes IMEX resource claims")
+        return self
 
     @model_validator(mode="after")
     def default_hf_home(self) -> "Cluster":

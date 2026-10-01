@@ -6,7 +6,7 @@ import yaml
 
 from manifesto.cluster import load_cluster
 from manifesto.parallelism import parallel_layout
-from manifesto.render import render
+from manifesto.render import render_kubernetes
 from manifesto.spec import load_spec
 
 
@@ -32,7 +32,7 @@ def test_all_kimi_k3_lws_roles_stay_within_one_gpu_clique():
 
     for model in KIMI_MODELS:
         spec = load_spec(model, CLUSTER)
-        objects = render(spec, user="tester", cluster=CLUSTER)
+        objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
 
         for role in spec.roles:
             if role.lws.size == 1:
@@ -65,7 +65,7 @@ def test_kimi_k3_aggregated_wide_ep_shape_and_backends():
     assert decode.parallelism.tp == 16
     assert decode.parallelism.dp_enabled is False
     assert parallel_layout(decode).tp_local_size == 4
-    assert parallel_layout(decode).cross_node_tp is True
+    assert parallel_layout(decode).nodes_per_dp_rank == 4
     assert parallel_layout(decode).dp_local_size == 1
     assert "decode_context_parallel_size" not in decode.vllm_args
 
@@ -77,7 +77,7 @@ def test_kimi_k3_aggregated_wide_ep_shape_and_backends():
 
 
 def test_kimi_k3_rendered_pods_request_full_gb200_nodes():
-    objects = render(load_spec(MODEL, CLUSTER), user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(load_spec(MODEL, CLUSTER), user="tester", cluster=CLUSTER)
     workload = _workload(objects, "decode")
     pod_spec = workload["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"]
     container = next(item for item in pod_spec["containers"] if item["name"] == "vllm")
@@ -107,7 +107,7 @@ def test_kimi_k3_rendered_pods_request_full_gb200_nodes():
     assert "--nnodes 4" in decode_script
     assert "--node-rank $LWS_WORKER_INDEX" in decode_script
     assert '--master-addr "${LWS_LEADER_ADDRESS}"' in decode_script
-    assert 'HEADLESS_ARGS=(--headless)' in decode_script
+    assert 'HEADLESS_ARGS=(--headless --api-server-count 0)' in decode_script
     assert '"${HEADLESS_ARGS[@]}"' in decode_script
     assert "--decode-context-parallel-size" not in decode_script
     assert "--all2all-backend" not in decode_script
@@ -119,7 +119,7 @@ def test_kimi_k3_rendered_pods_request_full_gb200_nodes():
 
     readiness = container["readinessProbe"]["exec"]["command"][-1]
     assert '${LWS_WORKER_INDEX:-0}' in readiness
-    assert "then exit 0" in readiness
+    assert "*) exit 0 ;;" in readiness
 
     service = next(obj for obj in objects if obj["kind"] == "Service" and obj["metadata"]["name"].endswith("decode-svc"))
     assert service["spec"]["selector"]["leaderworkerset.sigs.k8s.io/worker-index"] == "0"
@@ -159,7 +159,7 @@ def _annotations(objects: list[dict], role: str) -> dict:
 
 
 def _pd_objects() -> list[dict]:
-    return render(load_spec(PD_MODEL, CLUSTER), user="tester", cluster=CLUSTER)
+    return render_kubernetes(load_spec(PD_MODEL, CLUSTER), user="tester", cluster=CLUSTER)
 
 
 def test_kimi_k3_pd_dp4_tp4_shape():
@@ -176,7 +176,7 @@ def test_kimi_k3_pd_dp4_tp4_shape():
     assert prefill.lws.size == 4
     assert prefill.parallelism.tp == 4
     assert prefill.parallelism.dp_size == 4
-    assert prefill_layout.cross_node_tp is False
+    assert prefill_layout.nodes_per_dp_rank == 1
     assert prefill_layout.tp_local_size == 4
     assert prefill_layout.dp_local_size == 1
     # TRTLLM-GEN MoE is unusable here: it has no batched-GEMM kernel for this
@@ -190,7 +190,7 @@ def test_kimi_k3_pd_dp4_tp4_shape():
     assert decode.lws.size == 4
     assert decode.parallelism.tp == 4
     assert decode.parallelism.dp_size == 4
-    assert decode_layout.cross_node_tp is False
+    assert decode_layout.nodes_per_dp_rank == 1
     assert decode_layout.dp_local_size == 1
     assert decode.vllm_args["moe_backend"] == "auto"
     assert decode.vllm_args["max_num_seqs"] == 32
