@@ -9,7 +9,7 @@ from ..cluster import Cluster
 from ..features import WorkloadKind
 from ..images import DEFAULT_IMAGES
 from ..instance import Instance
-from ..resolve import resolve_role
+from ..resolve import ResolvedRole
 from ..spec import DeploymentSpec, RoutingFrontend, RoutingKind
 from .routing import gateway_name
 
@@ -214,6 +214,7 @@ def render_idle_shutdown(
     spec: DeploymentSpec,
     instance: Instance,
     cluster: Cluster,
+    resolved_roles: dict[str, ResolvedRole],
 ) -> list[dict]:
     """Render a small controller that watches vLLM request metrics instance-wide."""
     if not spec.runtime.idle_shutdown.enabled or not spec.roles:
@@ -234,17 +235,13 @@ def render_idle_shutdown(
     targets: dict[str, dict] = {}
     expected_targets = 0
     for role in spec.roles:
-        workload_name = (
-            instance.user_scoped_name(role.workload_name)
-            if role.workload_name
-            else instance.name(role.name)
-        )
-        resolved = resolve_role(spec, instance, cluster, role)
+        resolved = resolved_roles[role.name]
+        workload_name = resolved.workload_name
         targets[instance.labels(role=role.name)["llm-d.ai/role"]] = {
             "ports": list(resolved.ports.backend),
             "worker_indices": (
                 [str(node) for node in resolved.api_nodes]
-                if len(resolved.api_nodes) < resolved.layout.node_count
+                if resolved.has_headless_nodes
                 else None
             ),
         }
@@ -253,22 +250,17 @@ def render_idle_shutdown(
         )
         if resolved.features.workload_kind == WorkloadKind.DEPLOYMENT:
             deployment_names.append(workload_name)
-            model_workloads.append(
-                {
-                    "name": workload_name,
-                    "path": f"/apis/apps/v1/namespaces/{spec.namespace}/deployments/{workload_name}",
-                    "replicas": role.lws.replicas,
-                }
-            )
+            api_group, resource = "apps/v1", "deployments"
         else:
             lws_names.append(workload_name)
-            model_workloads.append(
-                {
-                    "name": workload_name,
-                    "path": f"/apis/leaderworkerset.x-k8s.io/v1/namespaces/{spec.namespace}/leaderworkersets/{workload_name}",
-                    "replicas": role.lws.replicas,
-                }
-            )
+            api_group, resource = "leaderworkerset.x-k8s.io/v1", "leaderworkersets"
+        model_workloads.append(
+            {
+                "name": workload_name,
+                "path": f"/apis/{api_group}/namespaces/{spec.namespace}/{resource}/{workload_name}",
+                "replicas": role.lws.replicas,
+            }
+        )
     workloads = model_workloads
     gateway: dict[str, str] | None = None
     if spec.routing.kind != RoutingKind.DISABLED:

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from manifesto import resolve
 from manifesto.cluster import load_cluster
 from manifesto.images import DEFAULT_IMAGES
 from manifesto.overrides import load_routing_profile
@@ -85,6 +86,28 @@ def test_rendered_yaml_parses():
     parsed = list(yaml.safe_load_all(render_to_yaml(objects)))
 
     assert len(parsed) == len(objects)
+
+
+@pytest.mark.parametrize("routing_only", [False, True])
+def test_role_resolution_is_reused_within_each_render(monkeypatch, routing_only):
+    spec = load_spec(ROOT / "models" / DEEPSEEK, CLUSTER)
+    calls = []
+    variable_context = resolve._variable_context
+
+    def record_resolution(spec, role, layout):
+        calls.append(role.name)
+        return variable_context(spec, role, layout)
+
+    monkeypatch.setattr(resolve, "_variable_context", record_resolution)
+    first = render_kubernetes(spec, user="tester", cluster=CLUSTER, routing_only=routing_only)
+    assert calls == [role.name for role in spec.roles]
+
+    # Reuse ends with the render: a later edit must get freshly resolved ports.
+    spec.role("decode").backend_port_base = 9000
+    calls.clear()
+    second = render_kubernetes(spec, user="tester", cluster=CLUSTER, routing_only=routing_only)
+    assert calls == [role.name for role in spec.roles]
+    assert second != first
 
 
 def test_rendered_launch_script_uses_literal_yaml_block():

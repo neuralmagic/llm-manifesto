@@ -20,7 +20,7 @@ DEFAULT_VLLM_ARGS: dict[str, Any] = {
     "disable_access_log_for_endpoints": "/health,/v1/models,/metrics",
 }
 POD_CACHE_MOUNT = "/var/cache/manifesto-pod"
-POD_CACHE_DIRS = {
+CACHE_DIRS = {
     "HOME": "home",
     "XDG_CACHE_HOME": "xdg",
     "VLLM_CACHE_ROOT": "vllm",
@@ -35,6 +35,7 @@ POD_CACHE_DIRS = {
 
 @dataclass(frozen=True)
 class ResolvedRole:
+    workload_name: str
     layout: ParallelLayout
     ports: RolePorts
     log_dir: str | None
@@ -59,6 +60,10 @@ class ResolvedRole:
         if self.features.external_dp:
             return tuple(range(0, self.layout.node_count, self.layout.nodes_per_dp_rank))
         return (0,)
+
+    @property
+    def has_headless_nodes(self) -> bool:
+        return len(self.api_nodes) < self.layout.node_count
 
 
 def resolve_role(spec: DeploymentSpec, instance: Instance, cluster: Cluster, role: RoleSpec) -> ResolvedRole:
@@ -156,11 +161,16 @@ def resolve_role(spec: DeploymentSpec, instance: Instance, cluster: Cluster, rol
             f"{spec.accelerator_config(cluster).gpu_arch}/{spec.cache.cuda}/"
             f"{spec.cache_key}/{instance.release_slug}"
         )
-        for name, directory in POD_CACHE_DIRS.items():
+        for name, directory in CACHE_DIRS.items():
             env[name] = f"{pod_cache_root}/{directory}"
             env_provenance[name] = "manifesto:pod cache"
 
     return ResolvedRole(
+        workload_name=(
+            instance.user_scoped_name(role.workload_name)
+            if role.workload_name
+            else instance.name(role.name)
+        ),
         layout=layout,
         ports=ports,
         log_dir=log_dir,
@@ -220,18 +230,8 @@ def _base_env(
     if spec.model.hf_home:
         env["HF_HOME"] = spec.model.hf_home
     if cache_prefix:
-        env |= {
-            "HOME": f"{cache_prefix}/home",
-            "XDG_CACHE_HOME": f"{cache_prefix}/xdg",
-            "VLLM_CACHE_ROOT": f"{cache_prefix}/vllm",
-            "FLASHINFER_CACHE_DIR": f"{cache_prefix}/flashinfer",
-            "FLASHINFER_WORKSPACE_BASE": f"{cache_prefix}/flashinfer-workspace",
-            "FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED": "1",
-            "FLASH_ATTENTION_CUTE_DSL_CACHE_DIR": f"{cache_prefix}/fa-cute-dsl",
-            "TRITON_CACHE_DIR": f"{cache_prefix}/triton",
-            "TORCHINDUCTOR_CACHE_DIR": f"{cache_prefix}/torchinductor",
-            "TILELANG_CACHE_DIR": f"{cache_prefix}/tilelang",
-        }
+        env |= {name: f"{cache_prefix}/{directory}" for name, directory in CACHE_DIRS.items()}
+        env["FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED"] = "1"
     if vllm_env:
         env["MANIFESTO_VLLM_ENV"] = vllm_env
     if platform == "openshift":

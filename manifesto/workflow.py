@@ -596,9 +596,9 @@ def deploy(
         from .slurm import submit
 
         return submit(manifest, cluster=cluster or load_runtime_cluster(config, args))
+    objects = parse_manifest(manifest)
     if not routing_only:
         require_hf_token()
-        objects = parse_manifest(manifest)
         preflight_workloads(config, objects)
         transitions = plan_workload_transitions(config, objects)
         rc = sync_hf_secret(config)
@@ -610,7 +610,6 @@ def deploy(
     rc = run([*config.kubectl(), "apply", "-f", "-"], input_text=manifest)
     if rc:
         return rc
-    objects = parse_manifest(manifest)
     return cleanup_obsolete_routing(config, objects)
 
 

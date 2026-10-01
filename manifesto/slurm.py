@@ -15,7 +15,7 @@ from decimal import Decimal, ROUND_CEILING
 from .cluster import Cluster
 from .instance import Instance
 from .launch import build_launch_script
-from .resolve import POD_CACHE_DIRS, resolve_role
+from .resolve import CACHE_DIRS, resolve_role
 from .spec import DeploymentSpec, RoutingKind, TopologyKind
 
 
@@ -105,12 +105,19 @@ def render_slurm(
     allocation = spec.accelerator_config(cluster).allocation.slurm
     assert allocation is not None
     name = f"manifesto-{instance.instance_id}"
-    directives = {
-        "job-name": name,
-        "nodes": str(role.lws.size),
+    task_options = {
         "ntasks": str(role.lws.size),
         "ntasks-per-node": "1",
         "cpus-per-task": str(cpu_count(role.resources.cpu)),
+    }
+    mounts = [
+        f"{bind.source}:{bind.target}:" + ("ro" if bind.read_only else "rw")
+        for bind in settings.binds
+    ]
+    directives = {
+        "job-name": name,
+        "nodes": str(role.lws.size),
+        **task_options,
         "mem": f"{memory_mib(role.resources.memory)}M",
         "gres": f"{allocation.gres}:{role.gpus_per_pod}",
         "time": settings.time,
@@ -144,7 +151,7 @@ def render_slurm(
             raise ValueError(f"invalid environment variable name: {key!r}")
         launch.append(f"export {key}={shlex.quote(value)}")
     if resolved.persistent_cache:
-        for key in POD_CACHE_DIRS:
+        for key in CACHE_DIRS:
             launch.append(f'export {key}="${{{key}}}/${{MANIFESTO_POD_UID}}"')
     launch.append(build_launch_script(spec, role, resolved, respect_visible_devices=True))
     task = [
@@ -162,15 +169,14 @@ def render_slurm(
         if not ("://" in image or image.startswith(("/", "./", "../")) or image.endswith(".sif")):
             image = f"docker://{image}"
         container = [settings.runtime, "exec", "--nv", "--no-eval"]
-        for bind in settings.binds:
-            container += ["--bind", f"{bind.source}:{bind.target}" + (":ro" if bind.read_only else ":rw")]
+        for mount in mounts:
+            container += ["--bind", mount]
         command = [*container, image]
     task.extend(_script_variable("MANIFESTO_LAUNCH", "\n".join(launch)))
     task.append("exec " + shlex.join([*command, "bash", "-c"]) + ' "$MANIFESTO_LAUNCH"')
     lines.extend(_script_variable("MANIFESTO_TASK", "\n".join(task)))
     srun = [
-        "srun", f"--ntasks={role.lws.size}", "--ntasks-per-node=1",
-        f"--cpus-per-task={cpu_count(role.resources.cpu)}",
+        "srun", *(f"--{key}={value}" for key, value in task_options.items()),
         "--cpu-bind=none", "--kill-on-bad-exit=1", "--wait=30", "--export=ALL",
     ]
     if settings.runtime == "pyxis":
@@ -178,9 +184,8 @@ def render_slurm(
         lines.append('export HF_TOKEN="${HF_TOKEN:-}"')
         srun += [f"--container-image={image}", "--no-container-entrypoint",
                  "--container-env=LWS_LEADER_ADDRESS,HF_TOKEN"]
-        if settings.binds:
-            mounts = ",".join(f"{bind.source}:{bind.target}" + (":ro" if bind.read_only else ":rw") for bind in settings.binds)
-            srun.append(f"--container-mounts={mounts}")
+        if mounts:
+            srun.append(f"--container-mounts={','.join(mounts)}")
     lines.append("exec " + shlex.join([*srun, "bash", "-c"]) + ' "$MANIFESTO_TASK"')
     return "\n".join(lines) + "\n"
 

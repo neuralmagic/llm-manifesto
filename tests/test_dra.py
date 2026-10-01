@@ -11,6 +11,7 @@ from manifesto.dra import DRA_CLAIM_NAME
 from manifesto.instance import Instance
 from manifesto.render import render_kubernetes
 from manifesto.render.lws import render_workload
+from manifesto.resolve import resolve_role
 from manifesto.spec import load_spec
 from manifesto.workload import (
     JobPolicy,
@@ -126,11 +127,10 @@ def test_dra_accelerator_claim_coexists_with_imex_claim():
     cluster = _dra_cluster()
     cluster.fabric.imex_resource_claim_template = "compute-domain-template"
     spec = load_spec(ROOT / "models/qwen/aggregated.yaml", cluster)
+    instance = Instance(user="tester", release=spec.release)
     workload = render_workload(
-        spec,
-        Instance(user="tester", release=spec.release),
-        cluster,
-        spec.roles[0],
+        spec, instance, cluster, spec.roles[0],
+        resolve_role(spec, instance, cluster, spec.roles[0]),
     )
     pod_spec = _pod_spec(workload)
     assert {claim["name"] for claim in pod_spec["resourceClaims"]} == {

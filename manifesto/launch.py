@@ -6,7 +6,7 @@ import json
 import shlex
 from typing import Any
 
-from .resolve import ResolvedRole
+from .resolve import CACHE_DIRS, ResolvedRole
 from .spec import DeploymentSpec, RoleSpec
 
 
@@ -61,24 +61,14 @@ def build_launch_script(
     vllm_env = resolved.vllm_env
     persistent_cache = resolved.persistent_cache
     external_dp = resolved.features.external_dp
-    multi_port_external_dp = external_dp and ports.rank_count > 1
-    headless_workers = len(resolved.api_nodes) < layout.node_count
+    multi_port_external_dp = ports.rank_count > 1
+    headless_workers = resolved.has_headless_nodes
     cleanup_cache = persistent_cache and spec.cache.cleanup_on_crash
     lines = ["set -euo pipefail"]
     if persistent_cache:
         # A deployment shares its cache prefix across pods. Scope writable JIT
         # caches before crash cleanup so one pod cannot remove another's files.
-        for name in (
-            "HOME",
-            "XDG_CACHE_HOME",
-            "VLLM_CACHE_ROOT",
-            "FLASHINFER_CACHE_DIR",
-            "FLASHINFER_WORKSPACE_BASE",
-            "FLASH_ATTENTION_CUTE_DSL_CACHE_DIR",
-            "TRITON_CACHE_DIR",
-            "TORCHINDUCTOR_CACHE_DIR",
-            "TILELANG_CACHE_DIR",
-        ):
+        for name in CACHE_DIRS:
             lines.append(f'export {name}="${{{name}}}/${{HOSTNAME}}"')
         lines.append("")
     if log_dir:

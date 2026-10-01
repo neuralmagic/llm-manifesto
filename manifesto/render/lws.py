@@ -15,7 +15,7 @@ from ..dra import (
 from ..features import Feature, WorkloadKind
 from ..instance import Instance
 from ..launch import build_launch_script
-from ..resolve import POD_CACHE_MOUNT, resolve_role
+from ..resolve import POD_CACHE_MOUNT, ResolvedRole
 from ..spec import DeploymentSpec, RoleSpec
 from ..workload import (
     KUEUE_QUEUE_LABEL as KUEUE_QUEUE_LABEL,
@@ -36,13 +36,13 @@ ACTIVE_PORTS_ANNOTATION = "inference.networking.k8s.io/active-ports"
 LWS_GROUP_KEY_LABEL = "leaderworkerset.sigs.k8s.io/group-key"
 
 
-def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, role: RoleSpec) -> dict:
-    resolved = resolve_role(spec, instance, cluster, role)
+def render_workload(
+    spec: DeploymentSpec, instance: Instance, cluster: Cluster, role: RoleSpec, resolved: ResolvedRole,
+) -> dict:
     accelerator = spec.accelerator_config(cluster)
-    external_dp = resolved.features.external_dp
-    multi_port_external_dp = external_dp and resolved.ports.rank_count > 1
+    multi_port_external_dp = resolved.ports.rank_count > 1
     layout = resolved.layout
-    workload_name = role_workload_name(instance, role)
+    workload_name = resolved.workload_name
     pod_cache = resolved.persistent_cache and resolved.features.workload_kind == WorkloadKind.DEPLOYMENT
 
     containers, extra_volumes = sidecars(
@@ -149,7 +149,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
             vllm_container["resources"][resource_kind]["ephemeral-storage"] = (
                 role.resources.ephemeral_storage
             )
-    if len(resolved.api_nodes) == layout.node_count and len(readiness_ports) == 1:
+    if not resolved.has_headless_nodes and len(readiness_ports) == 1:
         readiness_action = {
             "httpGet": {"path": "/v1/models", "port": readiness_ports[0]},
         }
@@ -158,7 +158,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
             f"curl -sf http://localhost:{port}/v1/models | grep -q '\"id\"'"
             for port in readiness_ports
         )
-        if len(resolved.api_nodes) < layout.node_count:
+        if resolved.has_headless_nodes:
             api_pattern = "|".join(str(node) for node in resolved.api_nodes)
             readiness_command = (
                 f'case "${{LWS_WORKER_INDEX:-0}}" in {api_pattern}) ;; *) exit 0 ;; esac; '
@@ -339,24 +339,17 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
     return render_controller_workload(workload)[0]
 
 
-def role_workload_name(instance: Instance, role: RoleSpec) -> str:
-    return (
-        instance.user_scoped_name(role.workload_name)
-        if role.workload_name
-        else instance.name(role.name)
-    )
-
-
 def render_accelerator_claim_template(
     spec: DeploymentSpec,
     instance: Instance,
     cluster: Cluster,
     role: RoleSpec,
+    resolved: ResolvedRole,
 ) -> dict | None:
     accelerator = spec.accelerator_config(cluster)
     if role.resources.gpus <= 0 or accelerator.device_class_name is None:
         return None
-    workload_name = role_workload_name(instance, role)
+    workload_name = resolved.workload_name
     labels = instance.labels("accelerator-claim-template", role.name)
     template_name = accelerator_claim_template_name(
         workload_name,
