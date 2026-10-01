@@ -1,0 +1,33 @@
+# Synthetic ARM64 Rubin profile. Set paths and optional slurm.ssh_host locally.
+name: example-slurm-gr100
+platform: slurm
+slurm:
+  partition: batch
+  runtime: pyxis
+  time: "01:00:00"
+  exclusive: true
+  binds:
+    - {source: /shared, target: /shared}
+  setup:
+    # Enroot image extraction needs xattrs; NFS may not provide them.
+    - export ENROOT_TEMP_PATH=/tmp
+    - export ENROOT_DATA_PATH="/tmp/manifesto-enroot-${UID}-${SLURM_JOB_ID}"
+    - export ENROOT_MAX_PROCESSORS=8
+accelerators:
+  default: gr100
+  profiles:
+    gr100:
+      gpus_per_node: 4
+      allocation:
+        slurm: {gres: "gpu:nvidia_gr100"}
+      gpu_arch: gr100
+      torch_cuda_arch_list: "10.7+PTX"
+cache:
+  hf_home: /shared/huggingface
+paths:
+  cache_root: /shared/{user}/jit-cache/{gpu_arch}/{cache_key}/{release}
+  log_root: /shared/{user}/logs/{release}
+fabric:
+  ucx_net_devices: ""
+  profiles:
+    standard: {}

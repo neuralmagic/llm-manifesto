@@ -138,7 +138,7 @@ def resolve_role(spec: DeploymentSpec, instance: Instance, cluster: Cluster, rol
             explicit_env=frozenset(env),
         )
     )
-    if cache_prefix and features.workload_kind == WorkloadKind.DEPLOYMENT:
+    if cache_prefix and cluster.platform != "slurm" and features.workload_kind == WorkloadKind.DEPLOYMENT:
         pod_cache_root = (
             f"{POD_CACHE_MOUNT}/jit-cache/"
             f"{spec.accelerator_config(cluster).gpu_arch}/{spec.cache.cuda}/"
@@ -229,6 +229,14 @@ def _validate_vllm_env_path(vllm_env: str, cluster: Cluster) -> None:
     path = PurePosixPath(posixpath.normpath(vllm_env))
     if not path.is_absolute():
         raise ValueError("runtime.vllm_env must be an absolute path")
+    if cluster.platform == "slurm":
+        assert cluster.slurm is not None
+        if cluster.slurm.runtime == "native":
+            return
+        mount_paths = [PurePosixPath(bind.target) for bind in cluster.slurm.binds]
+        if not any(path.is_relative_to(mount) for mount in mount_paths):
+            raise ValueError("runtime.vllm_env must be covered by slurm.binds")
+        return
     mount_paths = [PurePosixPath(mount["mountPath"]) for mount in cluster.volume_mounts()]
     if not any(path == mount or path.is_relative_to(mount) for mount in mount_paths):
         rendered = ", ".join(str(mount) for mount in mount_paths)

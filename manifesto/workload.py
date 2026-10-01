@@ -198,6 +198,12 @@ class WorkloadAccelerator(BaseModel):
     allocation: AcceleratorAllocationConfig
     node_selector: dict[str, str] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def require_kubernetes_allocation(self) -> "WorkloadAccelerator":
+        if self.allocation.slurm is not None:
+            raise ValueError("Kubernetes workload settings cannot use Slurm accelerator allocation")
+        return self
+
     @property
     def resource_name(self) -> str | None:
         backend = self.allocation.extended_resource
@@ -284,6 +290,9 @@ class WorkloadSettings(BaseModel):
 
 def workload_settings(cluster: Cluster) -> WorkloadSettings:
     """Project a full cluster profile onto the reusable workload contract."""
+
+    if cluster.platform == "slurm":
+        raise ValueError("the Kubernetes workload IR does not support Slurm; render a serving model with render slurm")
 
     pod = cluster.pod_defaults
     return WorkloadSettings(

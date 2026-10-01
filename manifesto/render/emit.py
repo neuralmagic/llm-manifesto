@@ -45,6 +45,8 @@ def render(
     cluster: Cluster,
     routing_only: bool = False,
 ) -> list[dict]:
+    if cluster.platform == "slurm":
+        raise ValueError("use render_slurm for Slurm batch scripts")
     instance = Instance(
         user=user,
         release=spec.release,

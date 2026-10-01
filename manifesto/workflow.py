@@ -120,13 +120,27 @@ class RuntimeConfig:
     cluster_path: str | None
     render_out: Path
     context: str | None = None
+    platform: str = "kubernetes"
 
     @classmethod
     def from_args(cls, args, *, require_cluster: bool = True) -> "RuntimeConfig":
         load_dotenv()
         user = resolve_user(getattr(args, "user", None))
         context = getattr(args, "context", None)
-        namespace = resolve_namespace(getattr(args, "namespace", None), context=context)
+        # An explicit Slurm profile must never require kubectl, even to choose
+        # defaults. Keep Kubernetes context discovery for Kubernetes commands.
+        explicit_cluster = getattr(args, "cluster", None) or os.environ.get("MANIFESTO_CLUSTER")
+        selected = (
+            load_cluster_with_overrides(resolve_catalog_path(explicit_cluster, "clusters"), args)
+            if explicit_cluster else None
+        )
+        is_slurm = selected is not None and selected.platform == "slurm"
+        if is_slurm and (context or getattr(args, "namespace", None)):
+            raise WorkflowError("Slurm does not use --context or --namespace", code=2)
+        namespace = (
+            "default" if is_slurm
+            else resolve_namespace(getattr(args, "namespace", None), context=context)
+        )
         cluster_path = (
             resolve_cluster(getattr(args, "cluster", None), context=context)
             if require_cluster
@@ -134,7 +148,9 @@ class RuntimeConfig:
         )
         render_out = Path(
             getattr(args, "output", None)
-            or os.environ.get("MANIFESTO_RENDER_OUT", "/tmp/manifesto.yaml")
+            or os.environ.get(
+                "MANIFESTO_RENDER_OUT", "/tmp/manifesto.sbatch" if is_slurm else "/tmp/manifesto.yaml"
+            )
         )
         return cls(
             user=user,
@@ -142,9 +158,15 @@ class RuntimeConfig:
             cluster_path=cluster_path,
             render_out=render_out,
             context=context,
+            platform="slurm" if is_slurm else "kubernetes",
         )
 
     def kubectl_base(self) -> list[str]:
+        if self.platform == "slurm":
+            raise WorkflowError(
+                "This command requires Kubernetes; use manifesto slurm servers/stop for Slurm jobs",
+                code=2,
+            )
         command = ["kubectl"]
         if self.context:
             command.extend(["--context", self.context])
@@ -409,6 +431,17 @@ def render_manifest(
         accelerator=getattr(args, "accelerator", None),
     )
     apply_runtime_overrides(spec, args, config)
+    if cluster.platform == "slurm":
+        from .slurm import render_slurm
+
+        if routing_only or getattr(args, "routing_profile", None) or os.environ.get("MANIFESTO_ROUTING_PROFILE"):
+            raise ValueError("Slurm does not support routing profiles or routing-only rendering")
+        if getattr(args, "idle_timeout_minutes", None) is not None:
+            raise ValueError("Slurm does not support --idle-timeout; use slurm.time")
+        return render_slurm(
+            spec, user=config.user, cluster=cluster,
+            header=manifest_header(args, config, cluster=cluster, model_path=model_path, routing_only=False),
+        )
     return render_to_yaml(
         render(spec, user=config.user, cluster=cluster, routing_only=routing_only),
         header=manifest_header(
@@ -529,9 +562,13 @@ def manifest_header(
         header.append(f"    {shlex.join(options)}")
     header.extend(
         [
-            "To set identity or placement, append --user USER and/or --namespace NAMESPACE.",
+            (
+                "To set identity, append --user USER."
+                if cluster.platform == "slurm"
+                else "To set identity or placement, append --user USER and/or --namespace NAMESPACE."
+            ),
             f"Source: {SOURCE_REPOSITORY}/tree/{revision}",
-            "Safe to edit before applying.",
+            "Safe to edit before submitting." if cluster.platform == "slurm" else "Safe to edit before applying.",
         ]
     )
     return header
@@ -553,6 +590,10 @@ def deploy(
 ) -> int:
     config = config or RuntimeConfig.from_args(args)
     manifest = render_manifest(args, config, routing_only=routing_only, cluster=cluster)
+    if config.platform == "slurm" or (cluster is not None and cluster.platform == "slurm"):
+        from .slurm import submit
+
+        return submit(manifest, cluster=cluster or load_runtime_cluster(config, args))
     if not routing_only:
         require_hf_token()
         objects = parse_manifest(manifest)

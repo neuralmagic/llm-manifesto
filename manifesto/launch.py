@@ -62,6 +62,7 @@ def build_launch_script(
     multi_port_external_dp: bool = False,
     distributed_dp: bool = False,
     vllm_raw_args: list[str] | None = None,
+    respect_visible_devices: bool = False,
 ) -> str:
     layout = parallel_layout(role)
     cleanup_cache = persistent_cache and spec.cache.cleanup_on_crash
@@ -225,7 +226,7 @@ def build_launch_script(
     ]
     if layout.pp_world_size > 1:
         base_args.append(["--pipeline-parallel-size", str(layout.pp_world_size)])
-    if not multi_port_external_dp:
+    if not multi_port_external_dp and not respect_visible_devices:
         device_ids = (
             ",".join(str(index) for index in range(layout.model_parallel_local_size))
             if single_rank
@@ -239,7 +240,7 @@ def build_launch_script(
             ["--nnodes", str(role.lws.size)],
             ["--node-rank", "$LWS_WORKER_INDEX"],
             ["--master-addr", '"${LWS_LEADER_ADDRESS}"'],
-            '"${HEADLESS_ARGS[@]}"',
+            '${HEADLESS_ARGS[@]+"${HEADLESS_ARGS[@]}"}',
         ]
     if distributed_dp:
         base_args += [
@@ -297,8 +298,13 @@ def build_launch_script(
         lines += _command_lines([*(() if cleanup_cache else ("exec",)), *base_args])
         return "\n".join(lines)
 
+    lines.append("")
+    if respect_visible_devices:
+        lines.append(
+            'IFS=, read -r -a MANIFESTO_VISIBLE_GPUS <<< '
+            '"${CUDA_VISIBLE_DEVICES:?Slurm must set CUDA_VISIBLE_DEVICES}"'
+        )
     lines += [
-        "",
         "for R in $(seq 0 $((DP_SIZE_LOCAL - 1))); do",
         f"  GPU_START=$((R * {layout.model_parallel_local_size}))",
         f"  GPUS=$(seq -s, $GPU_START $((GPU_START + {layout.model_parallel_local_size} - 1)))",
@@ -306,6 +312,12 @@ def build_launch_script(
         f"  PORTS=({' '.join(str(port) for port in ports.backend)})",
         "  PORT=${PORTS[$R]}",
     ]
+
+    if respect_visible_devices:
+        lines += [
+            f'  GPUS=$(IFS=,; echo "${{MANIFESTO_VISIBLE_GPUS[*]:GPU_START:{layout.model_parallel_local_size}}}")',
+            '  CUDA_VISIBLE_DEVICES="$GPUS" \\',
+        ]
 
     if persistent_cache:
         lines += [

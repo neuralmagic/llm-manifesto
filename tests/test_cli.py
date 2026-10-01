@@ -470,7 +470,7 @@ def test_config_export_and_import_cluster(monkeypatch, tmp_path, capsys):
 def test_top_level_help_has_compact_command_surface():
     help_text = _build_parser().format_help()
 
-    assert "{render,explain,file,deploy,servers,stop,ready,test,completion,config}" in help_text
+    assert "{render,slurm,explain,file,deploy,servers,stop,ready,test,completion,config}" in help_text
     for removed in (
         "cache-path",
         "dev-path",

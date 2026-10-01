@@ -7,6 +7,8 @@ from ..cluster import Cluster
 
 def render_bootstrap(cluster: Cluster, namespace: str) -> list[dict]:
     """Render resources that Manifesto owns for first-time namespace setup."""
+    if cluster.platform == "slurm":
+        raise ValueError("Slurm has no Kubernetes namespace bootstrap")
     claim = cluster.storage.shared_claim
     if claim is None:
         return []
