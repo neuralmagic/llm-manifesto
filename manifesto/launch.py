@@ -196,7 +196,7 @@ def build_launch_script(
             'case "$LWS_WORKER_INDEX" in',
             f"  {api_pattern}) ;;",
             "  *)",
-            "    HEADLESS_ARGS=(--headless)",
+            "    HEADLESS_ARGS=(--headless --api-server-count 0)",
         ]
         if layout.nodes_per_dp_rank == 1:
             # vLLM infers ranks from --node-rank when a DP rank spans nodes.
@@ -225,8 +225,6 @@ def build_launch_script(
             ["--node-rank", "$LWS_WORKER_INDEX"],
             ["--master-addr", '"${LWS_LEADER_ADDRESS}"'],
         ]
-    if headless_workers:
-        base_args.append('${HEADLESS_ARGS[@]+"${HEADLESS_ARGS[@]}"}')
     if role.parallelism.dp_enabled:
         dp_address = '"${LWS_LEADER_ADDRESS}"' if layout.node_count > 1 else "127.0.0.1"
         base_args += [
@@ -256,6 +254,10 @@ def build_launch_script(
         if arg := _format_arg(name, value):
             base_args.append(arg)
     base_args.extend(resolved.vllm_raw_args)
+    if headless_workers:
+        # Headless nodes cannot host API servers, even when the role configures
+        # a positive count. Apply node-specific flags after the role's options.
+        base_args.append('${HEADLESS_ARGS[@]+"${HEADLESS_ARGS[@]}"}')
 
     if lines[-1]:
         lines.append("")

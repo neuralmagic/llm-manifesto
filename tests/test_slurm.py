@@ -175,34 +175,55 @@ def test_generated_script_executes_with_correct_ranks_and_literal_env(tmp_path, 
     role.lws.size = nodes
     role.parallelism.tp = tp
     role.parallelism.dp = dp
+    role.vllm_args["api_server_count"] = 4
     layout = parallel_layout(role)
     spec.roles[0].env["LITERAL"] = "spaces 'quotes' $(touch SHOULD_NOT_EXIST) $HOME"
     spec.model.revision = "pinned-revision"
     spec.roles[0].computed = {"vllm": {"max_num_seqs": "tp * 2"}}
     _executable(tmp_path / "scontrol", f'print("\\n".join(f"node0{{rank+1}}" for rank in range({nodes})))\n')
     _executable(tmp_path / "srun", '''import os, subprocess, sys
+import json
 command = sys.argv[sys.argv.index("bash"):]
+preserved = next((arg.split("=", 1)[1].split(",") for arg in sys.argv if arg.startswith("--container-env=")), [])
 for rank in range(int(os.environ["SLURM_NTASKS"])):
     env = dict(os.environ, SLURM_PROCID=str(rank), SLURMD_NODENAME=f"node0{rank+1}")
+    env["CUDA_VISIBLE_DEVICES"] = json.loads(env["SCHEDULER_GPU_MASKS"])[rank]
+    if any(arg.startswith("--container-image=") for arg in sys.argv):
+        # Pyxis gives image values precedence unless --container-env names them.
+        for key in ("CUDA_VISIBLE_DEVICES", "LWS_LEADER_ADDRESS", "HF_TOKEN"):
+            if key not in preserved:
+                env[key] = "image-default"
     subprocess.run(command, env=env, check=True)
 ''')
     _executable(tmp_path / runtime, '''import os, subprocess, sys
+os.environ["CUDA_VISIBLE_DEVICES"] = "image-default"
 for key, value in list(os.environ.items()):
     for prefix in ("APPTAINERENV_", "SINGULARITYENV_"):
         if key.startswith(prefix):
             os.environ[key[len(prefix):]] = value
 subprocess.run(sys.argv[sys.argv.index("bash"):], check=True)
 ''')
-    _executable(tmp_path / "vllm", '''import json, os, sys
+    _executable(tmp_path / "vllm", '''import argparse, json, os, sys
+parser = argparse.ArgumentParser()
+parser.add_argument("--headless", action="store_true")
+parser.add_argument("--api-server-count", type=int)
+args, _ = parser.parse_known_args()
+if args.headless and args.api_server_count is not None and args.api_server_count > 0:
+    raise ValueError("--api-server-count cannot be positive with --headless")
 with open(os.environ["CAPTURE"], "a") as stream:
     stream.write(json.dumps({"args": sys.argv[1:], "env": dict(os.environ)}) + "\\n")
 ''')
     capture = tmp_path / "capture.jsonl"
     script = slurm.render_slurm(spec, user="tester", cluster=cluster)
+    gpu_masks = [
+        ",".join(str(2 * gpu + 1) if rank == 0 else f"GPU-node{rank}-{gpu}"
+                 for gpu in range(role.gpus_per_pod))
+        for rank in range(nodes)
+    ]
     env = dict(PATH=f"{tmp_path}:{os.environ['PATH']}", CAPTURE=str(capture),
                SLURM_JOB_NODELIST=f"node[01-0{nodes}]", SLURM_NTASKS=str(nodes),
                SLURM_JOB_ID="42", SLURM_ARRAY_TASK_ID="2",
-               CUDA_VISIBLE_DEVICES=",".join(["2", "5", *[f"GPU-uuid-{i}" for i in range(role.gpus_per_pod - 2)]]),
+               CUDA_VISIBLE_DEVICES="batch-mask", SCHEDULER_GPU_MASKS=json.dumps(gpu_masks),
                HF_TOKEN="test-token-not-in-artifact")
     assert env["HF_TOKEN"] not in script
     result = subprocess.run(["bash"], input=script, text=True, env=env, cwd=tmp_path, capture_output=True)
@@ -233,10 +254,12 @@ with open(os.environ["CAPTURE"], "a") as stream:
         assert args[args.index("--revision") + 1] == "pinned-revision"
         assert args[args.index("--max-num-seqs") + 1] == str(tp * 2)
         assert ("--headless" in args) == (rank > 0)
+        api_counts = [args[i + 1] for i, arg in enumerate(args) if arg == "--api-server-count"]
+        assert api_counts[-1] == ("0" if rank > 0 else "4")
         assert actual["LITERAL"] == spec.roles[0].env["LITERAL"]
         assert actual["MANIFESTO_POD_UID"] == "42-2"
         assert actual["HF_TOKEN"] == env["HF_TOKEN"]
-        assert actual["CUDA_VISIBLE_DEVICES"] == env["CUDA_VISIBLE_DEVICES"]
+        assert actual["CUDA_VISIBLE_DEVICES"] == gpu_masks[rank]
         assert "--device-ids" not in args
     assert not (tmp_path / "SHOULD_NOT_EXIST").exists()
 

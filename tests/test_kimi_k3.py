@@ -107,7 +107,7 @@ def test_kimi_k3_rendered_pods_request_full_gb200_nodes():
     assert "--nnodes 4" in decode_script
     assert "--node-rank $LWS_WORKER_INDEX" in decode_script
     assert '--master-addr "${LWS_LEADER_ADDRESS}"' in decode_script
-    assert 'HEADLESS_ARGS=(--headless)' in decode_script
+    assert 'HEADLESS_ARGS=(--headless --api-server-count 0)' in decode_script
     assert '"${HEADLESS_ARGS[@]}"' in decode_script
     assert "--decode-context-parallel-size" not in decode_script
     assert "--all2all-backend" not in decode_script

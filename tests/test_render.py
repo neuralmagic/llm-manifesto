@@ -1288,6 +1288,8 @@ def test_api_placement_agrees_with_launch_probes_and_routing(
     role.resources.gpus = role.gpus_per_pod
     api_nodes = external_api_nodes if routing == "load_aware" else [0]
     port_count = external_ports if routing == "load_aware" else 1
+    api_server_count = 1 if routing == "load_aware" else 4
+    role.vllm_args["api-server-count"] = api_server_count
 
     objects = render_kubernetes(spec, user="tester", cluster=cluster)
     if nodes == 1:
@@ -1318,6 +1320,8 @@ def test_api_placement_agrees_with_launch_probes_and_routing(
         )
         subprocess.run(["bash", "-c", container["args"][0]], env=env, check=True, capture_output=True)
         args = capture_args.read_text().splitlines()
+        api_counts = [args[i + 1] for i, arg in enumerate(args) if arg == "--api-server-count"]
+        assert api_counts[-1] == (str(api_server_count) if node in api_nodes else "0")
         if "--headless" not in args:
             actual_api_nodes.append(node)
         probe = container["readinessProbe"]

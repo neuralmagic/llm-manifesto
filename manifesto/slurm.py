@@ -183,7 +183,7 @@ def render_slurm(
         image = _pyxis_image(spec.model.image)
         lines.append('export HF_TOKEN="${HF_TOKEN:-}"')
         srun += [f"--container-image={image}", "--no-container-entrypoint",
-                 "--container-env=LWS_LEADER_ADDRESS,HF_TOKEN"]
+                 "--container-env=LWS_LEADER_ADDRESS,CUDA_VISIBLE_DEVICES,HF_TOKEN"]
         if mounts:
             srun.append(f"--container-mounts={','.join(mounts)}")
     lines.append("exec " + shlex.join([*srun, "bash", "-c"]) + ' "$MANIFESTO_TASK"')
