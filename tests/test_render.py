@@ -1185,6 +1185,57 @@ def test_routing_disabled_dp2_tp8_uses_internal_vllm_load_balancing():
     assert not any(obj["kind"] == "InferencePool" for obj in objects)
 
 
+@pytest.mark.parametrize("nodes", [1, 2])
+def test_internal_dp_uses_one_coordinated_api_endpoint(nodes):
+    cluster = _stateless_cluster()
+    spec = load_spec(ROOT / "models" / "qwen" / "qwen3-0.6b.yaml", cluster)
+    role = spec.role("decode")
+    role.lws.size = nodes
+    role.lws.replicas = 2
+    role.parallelism.tp = 2
+    role.parallelism.dp = 2 * nodes
+    role.resources.gpus = 4
+
+    objects = render(spec, user="tester", cluster=cluster)
+    if nodes == 1:
+        workload = _find(objects, "Deployment", "decode")
+        container = workload["spec"]["template"]["spec"]["containers"][0]
+    else:
+        workload = _find(objects, "LeaderWorkerSet", "decode")
+        container = workload["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"]["containers"][0]
+    script = container["args"][0]
+    assert "DP_SIZE_LOCAL=2" in script
+    assert f"DP_SIZE={2 * nodes}" in script
+    assert "--data-parallel-size-local $DP_SIZE_LOCAL" in script
+    assert "--data-parallel-rank" not in script
+    assert "--device-ids" not in script
+    assert "CUDA_VISIBLE_DEVICES=" not in script
+    assert "for R in" not in script
+    assert "exec \\\n  vllm" in script
+    subprocess.run(["bash", "-n"], input=script, text=True, check=True)
+    assert [port["containerPort"] for port in container["ports"]] == (
+        [8000] if nodes == 1 else [8000, 5555]
+    )
+
+    service = _find(objects, "Service", "decode-svc")
+    assert service["spec"]["ports"] == [{"name": "vllm-0", "port": 8000, "targetPort": 8000}]
+    if nodes > 1:
+        assert service["spec"]["selector"]["leaderworkerset.sigs.k8s.io/worker-index"] == "0"
+        readiness = container["readinessProbe"]["exec"]["command"][-1]
+        assert 'if [ "${LWS_WORKER_INDEX:-0}" -gt 0 ]' in readiness
+        assert "localhost:8000" in readiness
+    else:
+        assert "LWS_" not in script
+        assert container["readinessProbe"]["httpGet"]["port"] == 8000
+
+    controller = _find(objects, "Deployment", "idle-shutdown")
+    env = {item["name"]: item for item in controller["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert json.loads(env["TARGETS"]["value"])["decode"] == {
+        "ports": [8000], "worker_indices": ["0"] if nodes > 1 else None,
+    }
+    assert env["EXPECTED_TARGETS"]["value"] == "2"
+
+
 def test_cross_node_tp_custom_epp_render_is_repeatable_and_non_mutating():
     spec = load_spec(ROOT / "models" / DEEPSEEK, CLUSTER)
     base_objects = render(spec, user="tester", cluster=CLUSTER)

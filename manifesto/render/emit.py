@@ -79,7 +79,14 @@ def render(
                 instance,
                 role.name,
                 resolved.ports,
-                leader_only=parallel_layout(role).cross_node_model_parallel,
+                leader_only=(
+                    parallel_layout(role).cross_node_model_parallel
+                    or (
+                        role.parallelism.dp_enabled
+                        and not resolved.features.external_dp
+                        and role.lws.size > 1
+                    )
+                ),
             )
         )
     objects.extend(render_idle_shutdown(spec, instance, cluster))

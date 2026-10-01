@@ -242,6 +242,11 @@ def render_idle_shutdown(
         )
         resolved = resolve_role(spec, instance, cluster, role)
         layout = parallel_layout(role)
+        headless_workers = layout.cross_node_model_parallel or (
+            role.parallelism.dp_enabled
+            and not resolved.features.external_dp
+            and role.lws.size > 1
+        )
         serving_worker_indices = (
             layout.serving_worker_indices
             if layout.cross_node_model_parallel and resolved.features.external_dp
@@ -251,13 +256,13 @@ def render_idle_shutdown(
             "ports": list(resolved.ports.backend),
             "worker_indices": (
                 [str(index) for index in serving_worker_indices]
-                if layout.cross_node_model_parallel
+                if headless_workers
                 else None
             ),
         }
         serving_pods_per_replica = (
             len(serving_worker_indices)
-            if layout.cross_node_model_parallel
+            if headless_workers
             else role.lws.size
         )
         expected_targets += (

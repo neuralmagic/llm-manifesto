@@ -165,18 +165,22 @@ def _executable(path, body):
 
 
 @pytest.mark.parametrize("runtime", ["native", "apptainer", "singularity", "pyxis"])
-def test_generated_script_executes_with_correct_ranks_and_literal_env(tmp_path, cluster, spec, runtime):
-    """Execute both ranks with fake scheduler/container clients and a fake vLLM."""
+@pytest.mark.parametrize(("tp", "dp", "nodes"), [(16, False, 2), (2, 4, 2), (2, 2, 2), (2, 2, 1), (8, 2, 4)])
+def test_generated_script_executes_with_correct_ranks_and_literal_env(tmp_path, cluster, spec, runtime, tp, dp, nodes):
+    """Execute one vLLM launcher per node with fake scheduler/container clients."""
     cluster.slurm.runtime = runtime
-    spec.roles[0].lws.size = 2
-    spec.roles[0].parallelism.tp = 16
+    role = spec.roles[0]
+    role.lws.size = nodes
+    role.parallelism.tp = tp
+    role.parallelism.dp = dp
+    layout = parallel_layout(role)
     spec.roles[0].env["LITERAL"] = "spaces 'quotes' $(touch SHOULD_NOT_EXIST) $HOME"
     spec.model.revision = "pinned-revision"
     spec.roles[0].computed = {"vllm": {"max_num_seqs": "tp * 2"}}
-    _executable(tmp_path / "scontrol", 'print("node01\\nnode02")\n')
+    _executable(tmp_path / "scontrol", f'print("\\n".join(f"node0{{rank+1}}" for rank in range({nodes})))\n')
     _executable(tmp_path / "srun", '''import os, subprocess, sys
 command = sys.argv[sys.argv.index("bash"):]
-for rank in range(2):
+for rank in range(int(os.environ["SLURM_NTASKS"])):
     env = dict(os.environ, SLURM_PROCID=str(rank), SLURMD_NODENAME=f"node0{rank+1}")
     subprocess.run(command, env=env, check=True)
 ''')
@@ -194,20 +198,39 @@ with open(os.environ["CAPTURE"], "a") as stream:
     capture = tmp_path / "capture.jsonl"
     script = slurm.render_slurm(spec, user="tester", cluster=cluster)
     env = dict(PATH=f"{tmp_path}:{os.environ['PATH']}", CAPTURE=str(capture),
-               SLURM_JOB_NODELIST="node[01-02]", SLURM_JOB_ID="42", SLURM_ARRAY_TASK_ID="2",
-               CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7", HF_TOKEN="test-token-not-in-artifact")
+               SLURM_JOB_NODELIST=f"node[01-0{nodes}]", SLURM_NTASKS=str(nodes),
+               SLURM_JOB_ID="42", SLURM_ARRAY_TASK_ID="2",
+               CUDA_VISIBLE_DEVICES=",".join(["2", "5", *[f"GPU-uuid-{i}" for i in range(role.gpus_per_pod - 2)]]),
+               HF_TOKEN="test-token-not-in-artifact")
     assert env["HF_TOKEN"] not in script
     result = subprocess.run(["bash"], input=script, text=True, env=env, cwd=tmp_path, capture_output=True)
     assert result.returncode == 0, result.stderr
     records = [json.loads(line) for line in capture.read_text().splitlines()]
-    assert len(records) == 2
+    assert len(records) == nodes
     for rank, record in enumerate(records):
         args, actual = record["args"], record["env"]
-        assert args[args.index("--node-rank") + 1] == str(rank)
-        assert args[args.index("--master-addr") + 1] == "node01"
+        if layout.cross_node_model_parallel:
+            assert args[args.index("--node-rank") + 1] == str(rank)
+            assert args[args.index("--master-addr") + 1] == "node01"
+        else:
+            assert "--nnodes" not in args
+        if dp:
+            assert args[args.index("--data-parallel-size") + 1] == str(dp)
+            assert args[args.index("--data-parallel-size-local") + 1] == str(layout.dp_local_size)
+            assert args[args.index("--data-parallel-address") + 1] == ("node01" if nodes > 1 else "127.0.0.1")
+            assert args[args.index("--data-parallel-rpc-port") + 1] == "5555"
+            if rank > 0 and not layout.distributed_dp:
+                assert args[args.index("--data-parallel-start-rank") + 1] == str(rank * layout.dp_local_size)
+            else:
+                # start-rank on the API node would enable hybrid LB in vLLM.
+                assert "--data-parallel-start-rank" not in args
+            assert "--data-parallel-rank" not in args
+            assert "--data-parallel-external-lb" not in args
+            assert "--data-parallel-hybrid-lb" not in args
+        assert args[args.index("--port") + 1] == "8000"
         assert args[args.index("--revision") + 1] == "pinned-revision"
-        assert args[args.index("--max-num-seqs") + 1] == "32"
-        assert ("--headless" in args) == (rank == 1)
+        assert args[args.index("--max-num-seqs") + 1] == str(tp * 2)
+        assert ("--headless" in args) == (rank > 0)
         assert actual["LITERAL"] == spec.roles[0].env["LITERAL"]
         assert actual["MANIFESTO_POD_UID"] == "42-2"
         assert actual["HF_TOKEN"] == env["HF_TOKEN"]
@@ -331,19 +354,15 @@ def test_submit_timeout_is_not_retried(monkeypatch):
     assert len(calls) == 1
 
 
-def test_dp_slices_assigned_gpu_ids(cluster, spec):
+def test_dp_launch_leaves_device_assignment_to_vllm(cluster, spec):
     spec.roles[0].parallelism.dp = 2
     spec.roles[0].parallelism.tp = 2
     script = slurm.render_slurm(spec, user="tester", cluster=cluster)
     assert "--device-ids" not in script
-    assert 'CUDA_VISIBLE_DEVICES="$GPUS"' in script
-    # Execute the generated selection expression on non-contiguous and UUID IDs.
-    expression = next(line for line in script.splitlines() if "GPUS=$(IFS=" in line)
-    result = subprocess.run(["bash", "-c", '\n'.join([
-        'IFS=, read -r -a MANIFESTO_VISIBLE_GPUS <<< "2,5,GPU-abcd,GPU-efgh"',
-        "GPU_START=2", expression, 'echo "$GPUS"',
-    ])], capture_output=True, text=True, check=True)
-    assert result.stdout.strip() == "GPU-abcd,GPU-efgh"
+    assert "MANIFESTO_VISIBLE_GPUS" not in script
+    assert "for R in" not in script
+    assert "--data-parallel-size-local $DP_SIZE_LOCAL" in script
+    assert "--data-parallel-rank" not in script
 
 
 def test_kubernetes_commands_fail_before_remote_mutation(offline, capsys):

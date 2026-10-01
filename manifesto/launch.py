@@ -65,6 +65,8 @@ def build_launch_script(
     respect_visible_devices: bool = False,
 ) -> str:
     layout = parallel_layout(role)
+    internal_dp = role.parallelism.dp_enabled and not external_dp
+    headless_workers = layout.cross_node_model_parallel or (internal_dp and role.lws.size > 1)
     cleanup_cache = persistent_cache and spec.cache.cleanup_on_crash
     lines = ["set -euo pipefail"]
     if persistent_cache:
@@ -200,7 +202,7 @@ def build_launch_script(
             lines.append("START_RANK=$(( LWS_WORKER_INDEX * DP_SIZE_LOCAL ))")
         elif not distributed_dp:
             lines.append("START_RANK=0")
-    if layout.cross_node_model_parallel:
+    if headless_workers:
         lines += ["HEADLESS_ARGS=()"]
         if distributed_dp and external_dp:
             lines += [
@@ -209,29 +211,24 @@ def build_launch_script(
             ]
         else:
             lines.append('if [ "$LWS_WORKER_INDEX" -gt 0 ]; then')
-        lines += ["  HEADLESS_ARGS=(--headless)", "fi"]
-    single_rank = not role.parallelism.dp_enabled or distributed_dp
+        lines.append("  HEADLESS_ARGS=(--headless)")
+        if internal_dp and not layout.cross_node_model_parallel:
+            # Passing start-rank on the API node makes vLLM infer hybrid LB.
+            # Only headless nodes need an explicit starting DP rank.
+            lines.append('  HEADLESS_ARGS+=(--data-parallel-start-rank "$START_RANK")')
+        lines.append("fi")
 
     base_args: list[str | list[str]] = [
         "vllm",
         "serve",
         shlex.quote(spec.model.id),
-        [
-            "--port",
-            str(ports.backend[0])
-            if multi_port_external_dp or single_rank
-            else "$PORT",
-        ],
+        ["--port", str(ports.backend[0])],
         ["--tensor-parallel-size", str(layout.tp_world_size)],
     ]
     if layout.pp_world_size > 1:
         base_args.append(["--pipeline-parallel-size", str(layout.pp_world_size)])
-    if not multi_port_external_dp and not respect_visible_devices:
-        device_ids = (
-            ",".join(str(index) for index in range(layout.model_parallel_local_size))
-            if single_rank
-            else "$GPUS"
-        )
+    if not role.parallelism.dp_enabled and not respect_visible_devices:
+        device_ids = ",".join(str(index) for index in range(layout.model_parallel_local_size))
         base_args[3:3] = [["--device-ids", device_ids]]
     if role.parallelism.ep:
         base_args.append("--enable-expert-parallel")
@@ -240,8 +237,9 @@ def build_launch_script(
             ["--nnodes", str(role.lws.size)],
             ["--node-rank", "$LWS_WORKER_INDEX"],
             ["--master-addr", '"${LWS_LEADER_ADDRESS}"'],
-            '${HEADLESS_ARGS[@]+"${HEADLESS_ARGS[@]}"}',
         ]
+    if headless_workers:
+        base_args.append('${HEADLESS_ARGS[@]+"${HEADLESS_ARGS[@]}"}')
     if distributed_dp:
         base_args += [
             ["--data-parallel-size", "$DP_SIZE"],
@@ -266,11 +264,12 @@ def build_launch_script(
         dp_address = "${LWS_LEADER_ADDRESS}" if role.lws.size > 1 else "127.0.0.1"
         base_args += [
             ["--data-parallel-size", "$DP_SIZE"],
-            ["--data-parallel-rank", "$RANK"],
-            ["--data-parallel-size-local", "1"],
+            ["--data-parallel-size-local", "$DP_SIZE_LOCAL"],
             ["--data-parallel-address", dp_address],
             ["--data-parallel-rpc-port", "5555"],
         ]
+        if external_dp:
+            base_args.append(["--data-parallel-rank", "$START_RANK"])
     if role.kv_transfer_config:
         base_args.append(["--kv_transfer_config", shlex.quote(json.dumps(role.kv_transfer_config, separators=(",", ":")))])
     if spec.model.revision:
@@ -282,56 +281,14 @@ def build_launch_script(
             base_args.append(arg)
     base_args.extend(vllm_raw_args if vllm_raw_args is not None else role.vllm_raw_args)
 
-    if single_rank:
-        if lines[-1]:
-            lines.append("")
-        lines += _command_lines([*(() if cleanup_cache else ("exec",)), *base_args])
-        return "\n".join(lines)
-
-    if multi_port_external_dp:
+    if lines[-1]:
         lines.append("")
-        if persistent_cache:
-            lines += [
-                f"FLASH_ATTENTION_CUTE_DSL_CACHE_DIR=${{FLASH_ATTENTION_CUTE_DSL_CACHE_DIR}}/{role.name} \\",
-                f"TILELANG_CACHE_DIR=${{TILELANG_CACHE_DIR}}/{role.name} \\",
-            ]
-        lines += _command_lines([*(() if cleanup_cache else ("exec",)), *base_args])
-        return "\n".join(lines)
-
-    lines.append("")
-    if respect_visible_devices:
-        lines.append(
-            'IFS=, read -r -a MANIFESTO_VISIBLE_GPUS <<< '
-            '"${CUDA_VISIBLE_DEVICES:?Slurm must set CUDA_VISIBLE_DEVICES}"'
-        )
-    lines += [
-        "for R in $(seq 0 $((DP_SIZE_LOCAL - 1))); do",
-        f"  GPU_START=$((R * {layout.model_parallel_local_size}))",
-        f"  GPUS=$(seq -s, $GPU_START $((GPU_START + {layout.model_parallel_local_size} - 1)))",
-        "  RANK=$((START_RANK + R))",
-        f"  PORTS=({' '.join(str(port) for port in ports.backend)})",
-        "  PORT=${PORTS[$R]}",
-    ]
-
-    if respect_visible_devices:
+    if multi_port_external_dp and persistent_cache:
         lines += [
-            f'  GPUS=$(IFS=,; echo "${{MANIFESTO_VISIBLE_GPUS[*]:GPU_START:{layout.model_parallel_local_size}}}")',
-            '  CUDA_VISIBLE_DEVICES="$GPUS" \\',
+            f"FLASH_ATTENTION_CUTE_DSL_CACHE_DIR=${{FLASH_ATTENTION_CUTE_DSL_CACHE_DIR}}/{role.name} \\",
+            f"TILELANG_CACHE_DIR=${{TILELANG_CACHE_DIR}}/{role.name} \\",
         ]
-
-    if persistent_cache:
-        lines += [
-            "  VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT}/rank${RANK} \\",
-            "  FLASHINFER_CACHE_DIR=${FLASHINFER_CACHE_DIR}/rank${RANK} \\",
-            f"  FLASH_ATTENTION_CUTE_DSL_CACHE_DIR=${{FLASH_ATTENTION_CUTE_DSL_CACHE_DIR}}/{role.name}_rank${{RANK}} \\",
-            f"  TILELANG_CACHE_DIR=${{TILELANG_CACHE_DIR}}/{role.name}_rank${{RANK}} \\",
-        ]
-    lines += [
-        *_command_lines([*base_args, "&"], indent="  "),
-        "done",
-        "",
-        "wait -n",
-        "kill $(jobs -p) 2>/dev/null || true",
-        "exit 1",
-    ]
+    # vLLM starts local DP engines and assigns their devices. Preserve the
+    # scheduler/container GPU visibility instead of slicing it in a shell loop.
+    lines += _command_lines([*(() if cleanup_cache else ("exec",)), *base_args])
     return "\n".join(lines)

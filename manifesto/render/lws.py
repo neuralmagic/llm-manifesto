@@ -45,6 +45,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
     layout = parallel_layout(role)
     cross_node_model_parallel = layout.cross_node_model_parallel
     distributed_dp = layout.distributed_dp
+    internal_multinode_dp = role.parallelism.dp_enabled and not external_dp and role.lws.size > 1
     workload_name = role_workload_name(instance, role)
     pod_cache = resolved.persistent_cache and resolved.features.workload_kind == WorkloadKind.DEPLOYMENT
 
@@ -71,7 +72,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
     ]
     if multi_port_external_dp:
         container_ports.insert(0, {"containerPort": 8100, "name": "dp-supervisor"})
-    if distributed_dp:
+    if distributed_dp or internal_multinode_dp:
         container_ports.append({"containerPort": 5555, "name": "dp-rpc"})
     readiness_ports = resolved.ports.public if resolved.features.routing_proxy else resolved.ports.backend
 
@@ -165,7 +166,7 @@ def render_workload(spec: DeploymentSpec, instance: Instance, cluster: Cluster, 
             vllm_container["resources"][resource_kind]["ephemeral-storage"] = (
                 role.resources.ephemeral_storage
             )
-    if cross_node_model_parallel:
+    if cross_node_model_parallel or internal_multinode_dp:
         leader_readiness = " && ".join(
             f"curl -sf http://localhost:{port}/v1/models | grep -q '\"id\"'"
             for port in readiness_ports

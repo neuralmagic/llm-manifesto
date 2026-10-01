@@ -51,11 +51,6 @@ class ResolvedRole:
 
 def resolve_role(spec: DeploymentSpec, instance: Instance, cluster: Cluster, role: RoleSpec) -> ResolvedRole:
     layout = parallel_layout(role)
-    ports = derive_ports(
-        rank_count=layout.dp_local_size,
-        public_base=role.serving_port_base,
-        backend_base=role.backend_port_base,
-    )
     context = _variable_context(spec, role, layout)
     computed_env = render_mapping(role.computed.get("env", {}), context)
     context |= computed_env
@@ -137,6 +132,11 @@ def resolve_role(spec: DeploymentSpec, instance: Instance, cluster: Cluster, rol
             api_server_count=_api_server_count(vllm_args),
             explicit_env=frozenset(env),
         )
+    )
+    ports = derive_ports(
+        rank_count=layout.dp_local_size if features.external_dp else 1,
+        public_base=role.serving_port_base,
+        backend_base=role.backend_port_base,
     )
     if cache_prefix and cluster.platform != "slurm" and features.workload_kind == WorkloadKind.DEPLOYMENT:
         pod_cache_root = (

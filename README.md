@@ -815,9 +815,11 @@ schema and launch logic as Kubernetes.
 
 Each replica uses its first allocated host for rendezvous and prints that
 host's serving URL in the batch log. `srun` propagates failures to the other
-nodes in the replica. GPU selection honors Slurm's `CUDA_VISIBLE_DEVICES`,
-including noncontiguous device IDs and UUIDs. Local DP processes receive
-disjoint slices of those assigned devices. Replicas have separate endpoints;
+nodes in the replica. Manifesto passes Slurm's `CUDA_VISIBLE_DEVICES` unchanged
+into each container, including noncontiguous device IDs and UUIDs. One vLLM
+launcher per node starts the local DP engines and assigns their devices. For
+DP, vLLM's coordinator manages the group, with the API on the first node and
+headless workers on the remaining nodes. Replicas have separate endpoints;
 Manifesto does not install a load balancer on Slurm.
 
 Cluster accelerator allocation uses `slurm: {gres: gpu}` or a typed value such
