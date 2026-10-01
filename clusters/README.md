@@ -22,7 +22,6 @@ when they are environment-specific.
 
 Slurm profiles set `platform: slurm`, a `slurm` configuration, and
 `allocation.slurm.gres` for every accelerator. `example-slurm.yaml` uses
-Apptainer; `example-slurm-gr100.yaml` illustrates Pyxis on four-GPU ARM64 Rubin
-nodes. Keep login addresses (`slurm.ssh_host`), accounts, site constraints, and
+Apptainer. Keep login addresses (`slurm.ssh_host`), accounts, site constraints, and
 actual bind paths in private profiles. Slurm profiles are selected explicitly
 with `--cluster` or `MANIFESTO_CLUSTER` and do not use kube-context discovery.

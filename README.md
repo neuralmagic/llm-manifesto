@@ -762,10 +762,8 @@ The rendered pods tee logs to `{root}/{role}`, for example
 
 Select `platform: slurm` in a cluster profile. Start with
 [`clusters/example-slurm.yaml`](clusters/example-slurm.yaml) for
-Apptainer/Singularity, or
-[`clusters/example-slurm-gr100.yaml`](clusters/example-slurm-gr100.yaml) for
-ARM64 Rubin nodes using Pyxis/Enroot. Copy the profile into your private cluster
-catalog and set its partition, GPU type, runtime, and filesystem paths.
+Apptainer/Singularity. Copy the profile into your private cluster catalog and
+set its partition, GPU type, runtime, and filesystem paths.
 
 ```bash
 manifesto render slurm models/qwen/slurm.yaml --cluster my-slurm -o qwen.sbatch
@@ -855,7 +853,7 @@ For Rubin, select an ARM64 image built for the GPU and driver, such as an
 appropriate CUDA 13.4 vLLM build. The generic model example's standard image is
 not a promise of Rubin compatibility. Enroot extraction needs filesystem
 features such as extended attributes; use node-local temporary/data paths when
-the shared home filesystem is NFS. The GR100 example shows this configuration.
+the shared home filesystem is NFS.
 See the [vLLM Rubin image guidance](https://docs.vllm.ai/en/latest/deployment/docker/)
 and [Pyxis runtime options](https://github.com/NVIDIA/pyxis#usage).
 
