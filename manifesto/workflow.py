@@ -406,8 +406,9 @@ def apply_runtime_overrides(spec, args, config: RuntimeConfig) -> None:
     if getattr(args, "vllm_env", None) is not None:
         spec.runtime.vllm_env = args.vllm_env
     if getattr(args, "idle_timeout_minutes", None) is not None:
-        spec.runtime.idle_shutdown.enabled = True
-        spec.runtime.idle_shutdown.timeout_minutes = args.idle_timeout_minutes
+        spec.runtime.idle_shutdown = spec.runtime.idle_shutdown.model_copy(
+            update={"enabled": True, "timeout_minutes": args.idle_timeout_minutes}
+        )
     if getattr(args, "no_idle_shutdown", False):
         spec.runtime.idle_shutdown.enabled = False
     spec.runtime.pre_launch.extend(getattr(args, "pre_launch", None) or [])
@@ -440,19 +441,11 @@ def render_manifest(
         accelerator=getattr(args, "accelerator", None),
     )
     apply_runtime_overrides(spec, args, config)
-    if cluster.platform == "slurm":
-        from .slurm import render_slurm
-
-        if routing_only or getattr(args, "routing_profile", None) or os.environ.get("MANIFESTO_ROUTING_PROFILE"):
-            raise ValueError("Slurm does not support routing profiles or routing-only rendering")
-        if getattr(args, "idle_timeout_minutes", None) is not None:
-            raise ValueError("Slurm does not support --idle-timeout; use slurm.time")
-        return render_slurm(
-            spec, user=config.user, cluster=cluster,
-            header=manifest_header(args, config, cluster=cluster, model_path=model_path, routing_only=False),
-        )
-    return render_to_yaml(
-        render(spec, user=config.user, cluster=cluster, routing_only=routing_only),
+    return render(
+        spec,
+        user=config.user,
+        cluster=cluster,
+        routing_only=routing_only,
         header=manifest_header(
             args,
             config,

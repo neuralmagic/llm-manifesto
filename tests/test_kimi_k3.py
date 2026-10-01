@@ -6,7 +6,7 @@ import yaml
 
 from manifesto.cluster import load_cluster
 from manifesto.parallelism import parallel_layout
-from manifesto.render import render
+from manifesto.render import render_kubernetes
 from manifesto.spec import load_spec
 
 
@@ -32,7 +32,7 @@ def test_all_kimi_k3_lws_roles_stay_within_one_gpu_clique():
 
     for model in KIMI_MODELS:
         spec = load_spec(model, CLUSTER)
-        objects = render(spec, user="tester", cluster=CLUSTER)
+        objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
 
         for role in spec.roles:
             if role.lws.size == 1:
@@ -77,7 +77,7 @@ def test_kimi_k3_aggregated_wide_ep_shape_and_backends():
 
 
 def test_kimi_k3_rendered_pods_request_full_gb200_nodes():
-    objects = render(load_spec(MODEL, CLUSTER), user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(load_spec(MODEL, CLUSTER), user="tester", cluster=CLUSTER)
     workload = _workload(objects, "decode")
     pod_spec = workload["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"]
     container = next(item for item in pod_spec["containers"] if item["name"] == "vllm")
@@ -159,7 +159,7 @@ def _annotations(objects: list[dict], role: str) -> dict:
 
 
 def _pd_objects() -> list[dict]:
-    return render(load_spec(PD_MODEL, CLUSTER), user="tester", cluster=CLUSTER)
+    return render_kubernetes(load_spec(PD_MODEL, CLUSTER), user="tester", cluster=CLUSTER)
 
 
 def test_kimi_k3_pd_dp4_tp4_shape():

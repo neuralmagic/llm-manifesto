@@ -894,6 +894,26 @@ explicit `--cluster` and `--namespace` (or with `MANIFESTO_NAMESPACE` set).
 Workflow commands such as `deploy`, `ready`, `file diff`, and `file apply` are the
 cluster-touching commands.
 
+### Python rendering API
+
+`manifesto.render.render()` returns ready-to-write text: Kubernetes YAML or a
+Slurm batch script, selected by `cluster.platform`.
+
+```python
+from manifesto.cluster import load_cluster
+from manifesto.render import render
+from manifesto.spec import load_spec
+
+cluster = load_cluster("clusters/example-slurm.yaml")
+spec = load_spec("models/qwen/slurm.yaml", cluster)
+artifact = render(spec, user="tester", cluster=cluster)
+```
+
+Python callers that need Kubernetes object dictionaries should use
+`render_kubernetes()`; `render_to_yaml()` serializes those objects. Existing
+callers that used `render()` for an object list should switch to
+`render_kubernetes()`.
+
 ## Lifecycle Commands
 
 ```bash

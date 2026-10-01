@@ -16,6 +16,7 @@ from manifesto.cli import main
 from manifesto.cluster import Cluster, load_cluster
 from manifesto.instance import Instance
 from manifesto.parallelism import parallel_layout
+from manifesto.render import render
 from manifesto.resolve import resolve_role
 from manifesto.slurm_config import SlurmConfig
 from manifesto.spec import DeploymentSpec, load_spec
@@ -87,6 +88,7 @@ def test_kubernetes_cluster_settings_are_rejected():
 
 @pytest.mark.parametrize("update", [
     {"routing": {"kind": "load_aware"}},
+    {"routing": {"kind": "disabled", "epp": {"image": "test/epp"}}},
     {"runtime": {"sidecars": ["dcgm-exporter"]}},
     {"runtime": {"idle_shutdown": {"enabled": True}}},
     {"roles": [{"name": "decode", "workload": "deployment"}]},
@@ -99,7 +101,7 @@ def test_unsupported_serving_features_fail(cluster, update):
     data["model"] = {"id": "test/model", "image": "test/image:v1"}
     data.update(update)
     with pytest.raises(ValueError):
-        slurm.render_slurm(DeploymentSpec.model_validate(data), user="tester", cluster=cluster)
+        render(DeploymentSpec.model_validate(data), user="tester", cluster=cluster)
 
 
 def test_default_kubernetes_controllers_do_not_block_direct_serving(cluster):
@@ -261,6 +263,32 @@ def test_render_and_validate_cli_are_offline(offline, capsys, tmp_path):
     assert "1 Slurm batch script" in capsys.readouterr().out
     assert main(["explain", *args]) == 0
     assert "workload: slurm" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", [["render", "manifest"], ["render", "slurm"], ["explain"]])
+def test_slurm_idle_override_is_validated_even_when_runtime_is_default(
+    offline, capsys, tmp_path, command
+):
+    data = yaml.safe_load(MODEL.read_text())
+    data.pop("runtime")
+    model = tmp_path / "default-runtime.yaml"
+    model.write_text(yaml.safe_dump(data))
+
+    assert main([*command, str(model), "--cluster", str(CLUSTER), "--idle-timeout", "5m"]) == 2
+    assert "Slurm does not support idle shutdown" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("source", ["flag", "environment"])
+def test_slurm_routing_override_is_validated(offline, monkeypatch, capsys, source):
+    profile = str(ROOT / "routing/wide-ep-lws-config.yaml")
+    args = ["render", "manifest", str(MODEL), "--cluster", str(CLUSTER)]
+    if source == "flag":
+        args.extend(["--routing-profile", profile])
+    else:
+        monkeypatch.setenv("MANIFESTO_ROUTING_PROFILE", profile)
+
+    assert main(args) == 2
+    assert "Slurm does not support routing profiles" in capsys.readouterr().err
 
 
 def test_slurm_env_default_selects_script_output(offline, monkeypatch):

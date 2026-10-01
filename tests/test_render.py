@@ -14,7 +14,7 @@ import yaml
 from manifesto.cluster import load_cluster
 from manifesto.images import DEFAULT_IMAGES
 from manifesto.overrides import load_routing_profile
-from manifesto.render import render, render_to_yaml
+from manifesto.render import render_kubernetes, render_to_yaml
 from manifesto.render.idle_shutdown import IDLE_SHUTDOWN_SCRIPT
 from manifesto.spec import EppSpec, RoutingFrontend, RuntimeSpec, load_spec
 
@@ -31,7 +31,7 @@ def _stateless_cluster():
 
 def _objects(config: str) -> list[dict]:
     spec = load_spec(ROOT / "models" / config, CLUSTER)
-    return render(spec, user="tester", cluster=CLUSTER)
+    return render_kubernetes(spec, user="tester", cluster=CLUSTER)
 
 
 def _objects_with_routing_profile(config: str, profile: str) -> list[dict]:
@@ -41,7 +41,7 @@ def _objects_with_routing_profile(config: str, profile: str) -> list[dict]:
         plugins_config_file=path.name,
         plugin_configs={path.name: plugin_config},
     )
-    return render(spec, user="tester", cluster=CLUSTER)
+    return render_kubernetes(spec, user="tester", cluster=CLUSTER)
 
 
 def _find(objects: list[dict], kind: str, name_suffix: str | None = None) -> dict:
@@ -98,7 +98,7 @@ def test_rendered_launch_script_uses_literal_yaml_block():
 def test_stateless_single_rank_render_omits_filesystem_and_distributed_baggage():
     cluster = _stateless_cluster()
     spec = load_spec(ROOT / "models" / "qwen" / "qwen3-0.6b.yaml", cluster)
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
 
     assert [obj["kind"] for obj in objects] == [
         "Deployment",
@@ -147,20 +147,20 @@ def test_vllm_env_requires_an_absolute_mounted_path():
     spec.runtime.vllm_env = "relative/worktree"
 
     with pytest.raises(ValueError, match="must be an absolute path"):
-        render(spec, user="tester", cluster=cluster)
+        render_kubernetes(spec, user="tester", cluster=cluster)
 
     spec.runtime.vllm_env = "/unmounted/worktree"
     with pytest.raises(ValueError, match="not covered by a model pod volume mount"):
-        render(spec, user="tester", cluster=cluster)
+        render_kubernetes(spec, user="tester", cluster=cluster)
 
     spec.runtime.vllm_env = "/mnt/shared/../unmounted/worktree"
     with pytest.raises(ValueError, match="not covered by a model pod volume mount"):
-        render(spec, user="tester", cluster=CLUSTER)
+        render_kubernetes(spec, user="tester", cluster=CLUSTER)
 
 
 def test_idle_shutdown_is_enabled_by_default_for_45_minutes():
     spec = load_spec(ROOT / "models" / DEEPSEEK, CLUSTER)
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     controller = _find(objects, "Deployment", "idle-shutdown")
     container = controller["spec"]["template"]["spec"]["containers"][0]
     env = {item["name"]: item for item in container["env"]}
@@ -208,7 +208,7 @@ def test_idle_shutdown_is_enabled_by_default_for_45_minutes():
 def test_gateway_frontend_grants_idle_shutdown_gateway_delete():
     spec = load_spec(ROOT / "models" / DEEPSEEK, CLUSTER)
     spec.routing.frontend = RoutingFrontend.GATEWAY
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     controller = _find(objects, "Deployment", "idle-shutdown")
     env = {
         item["name"]: item
@@ -336,7 +336,7 @@ def test_idle_shutdown_restores_workloads_when_gateway_deletion_fails(monkeypatc
 def test_idle_shutdown_can_be_disabled_or_given_a_custom_timeout():
     spec = load_spec(ROOT / "models" / "qwen" / "qwen3-0.6b.yaml", _stateless_cluster())
     spec.runtime.idle_shutdown.enabled = False
-    objects = render(spec, user="tester", cluster=_stateless_cluster())
+    objects = render_kubernetes(spec, user="tester", cluster=_stateless_cluster())
 
     assert not any(
         obj["metadata"].get("labels", {}).get("app.kubernetes.io/component")
@@ -346,7 +346,7 @@ def test_idle_shutdown_can_be_disabled_or_given_a_custom_timeout():
 
     spec.runtime.idle_shutdown.enabled = True
     spec.runtime.idle_shutdown.timeout_minutes = 12
-    objects = render(spec, user="tester", cluster=_stateless_cluster())
+    objects = render_kubernetes(spec, user="tester", cluster=_stateless_cluster())
     controller = _find(objects, "Deployment", "idle-shutdown")
     env = {
         item["name"]: item
@@ -364,7 +364,7 @@ def test_idle_shutdown_can_be_disabled_or_given_a_custom_timeout():
 
 def test_idle_shutdown_only_scrapes_cross_node_tp_api_servers():
     spec = load_spec(ROOT / "models" / "kimi-k3" / "aggregated-tp16-ep16.yaml", CLUSTER)
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     controller = _find(objects, "Deployment", "idle-shutdown")
     env = {
         item["name"]: item
@@ -396,7 +396,7 @@ def test_idle_shutdown_only_scrapes_cross_node_dp_api_servers(
     role.parallelism.dp = 2
     role.resources.gpus = 1
 
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     controller = _find(objects, "Deployment", "idle-shutdown")
     env = {
         item["name"]: item
@@ -443,7 +443,7 @@ def test_nixl_roles_advertise_their_pod_ip():
 def test_explicit_nixl_side_channel_host_is_preserved():
     spec = load_spec(ROOT / "models" / DEEPSEEK, CLUSTER)
     spec.role("decode").env["VLLM_NIXL_SIDE_CHANNEL_HOST"] = "nixl.example.test"
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     workload = _find(objects, "LeaderWorkerSet", "decode")
     container = workload["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"][
         "containers"
@@ -462,7 +462,7 @@ def test_non_nixl_role_does_not_get_side_channel_host():
     spec.role("decode").kv_transfer_config = {
         "kv_connector": "LMCacheConnectorV1",
     }
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     workload = _find(objects, "Deployment", "decode")
     container = workload["spec"]["template"]["spec"]["containers"][0]
 
@@ -531,7 +531,7 @@ def test_crash_cleanup_clears_compilation_caches_but_preserves_autotuning():
 
 def test_deployment_jit_caches_follow_pod_lifetime():
     spec = load_spec(ROOT / "models" / "qwen" / "qwen3-0.6b.yaml", CLUSTER)
-    deployment = _find(render(spec, user="tester", cluster=CLUSTER), "Deployment", "decode")
+    deployment = _find(render_kubernetes(spec, user="tester", cluster=CLUSTER), "Deployment", "decode")
     pod_spec = deployment["spec"]["template"]["spec"]
     container = pod_spec["containers"][0]
     env = {item["name"]: item["value"] for item in container["env"] if "value" in item}
@@ -621,7 +621,7 @@ def test_failed_launch_removes_compile_files_and_keeps_autotune_files(tmp_path):
 def test_crash_cleanup_can_be_disabled():
     spec = load_spec(ROOT / "models" / DEEPSEEK, CLUSTER)
     spec.cache.cleanup_on_crash = False
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     workload = _find(objects, "LeaderWorkerSet", "decode")
     script = workload["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"]["containers"][0]["args"][0]
     env_names = {
@@ -649,7 +649,7 @@ def test_deepseek_lws_uses_short_workload_names_with_full_instance_labels():
 
 def test_deepseek_ep16_decode_name_keeps_decode_width():
     spec = load_spec(ROOT / "models" / "deepseek-v4" / "3P-EP8-1D-EP16.yaml", CLUSTER)
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     decode = _find(objects, "LeaderWorkerSet", "decode")
     prefill = _find(objects, "LeaderWorkerSet", "prefill")
 
@@ -675,7 +675,7 @@ def test_shared_storage_accepts_non_pvc_volume_sources():
     cluster = CLUSTER.model_copy(deep=True)
     cluster.storage.shared_volume = {"emptyDir": {}}
     spec = load_spec(ROOT / "models" / DEEPSEEK, cluster)
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
     lws = _find(objects, "LeaderWorkerSet", "decode")
     pod_spec = lws["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"]
     volume = next(volume for volume in pod_spec["volumes"] if volume["name"] == "shared-storage")
@@ -688,7 +688,7 @@ def test_gateway_class_comes_from_cluster_profile():
     cluster.gateway.class_name = "platform-gateway"
     spec = load_spec(ROOT / "models" / DEEPSEEK, cluster)
     spec.routing.frontend = RoutingFrontend.GATEWAY
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
     gateway = _find(objects, "Gateway")
     gateway_options = _find(objects, "ConfigMap", "gateway-options")
 
@@ -710,7 +710,7 @@ def test_cluster_pull_secrets_are_attached_to_every_generated_pod():
     spec = load_spec(ROOT / "models" / DEEPSEEK, cluster)
     spec.routing.frontend = RoutingFrontend.GATEWAY
 
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
 
     expected = [
         {"name": "example-registry-credentials"},
@@ -736,7 +736,7 @@ def test_cluster_pull_secrets_are_attached_to_every_generated_pod():
 
 def test_standalone_is_the_default_and_routing_only_refreshes_idle_shutdown():
     spec = load_spec(ROOT / "models" / DEEPSEEK, CLUSTER)
-    objects = render(spec, user="tester", cluster=CLUSTER, routing_only=True)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER, routing_only=True)
 
     assert spec.routing.frontend == RoutingFrontend.STANDALONE
     assert len(objects) == 13
@@ -766,7 +766,7 @@ def test_standalone_routing_ignores_long_gateway_class_name():
     cluster.gateway.class_name = "g" * 53
     spec = load_spec(ROOT / "models" / DEEPSEEK, cluster)
 
-    objects = render(spec, user="tester", cluster=cluster, routing_only=True)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster, routing_only=True)
 
     assert _find(objects, "Service", "infpool-epp")
     assert not any(obj["kind"] == "Gateway" for obj in objects)
@@ -776,7 +776,7 @@ def test_standalone_envoy_sidecar_and_service_match_router_contract():
     cluster = CLUSTER.model_copy(deep=True)
     cluster.llm_d.images["envoy"] = "registry.test/envoy:v1"
     spec = load_spec(ROOT / "models" / DEEPSEEK, cluster)
-    objects = render(spec, user="tester", cluster=cluster, routing_only=True)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster, routing_only=True)
     service = _find(objects, "Service", "infpool-epp")
     deployment = _find(objects, "Deployment", "infpool-epp")
     envoy = _container(deployment, "envoy-proxy")
@@ -808,7 +808,7 @@ def test_standalone_envoy_sidecar_and_service_match_router_contract():
 def test_explicit_gateway_frontend_preserves_gateway_resources():
     spec = load_spec(ROOT / "models" / DEEPSEEK, CLUSTER)
     spec.routing.frontend = RoutingFrontend.GATEWAY
-    objects = render(spec, user="tester", cluster=CLUSTER, routing_only=True)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER, routing_only=True)
     deployment = _find(objects, "Deployment", "infpool-epp")
     service = _find(objects, "Service", "infpool-epp")
 
@@ -822,7 +822,7 @@ def test_gateway_routing_only_refreshes_idle_shutdown_gateway_state():
     spec = load_spec(ROOT / "models" / DEEPSEEK, CLUSTER)
     spec.routing.frontend = RoutingFrontend.GATEWAY
 
-    objects = render(spec, user="tester", cluster=CLUSTER, routing_only=True)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER, routing_only=True)
 
     gateway = _find(objects, "Gateway")
     controller = _find(objects, "Deployment", "idle-shutdown")
@@ -846,7 +846,7 @@ def test_dedicated_logging_pvc_is_mounted_when_configured():
     cluster.logging.mount_path = "/mnt/logs"
     cluster.logging.root = "/mnt/logs/{user}/{release}"
     spec = load_spec(ROOT / "models" / DEEPSEEK, cluster)
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
     lws = _find(objects, "LeaderWorkerSet", "decode")
     pod_spec = lws["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"]
     container = pod_spec["containers"][0]
@@ -861,7 +861,7 @@ def test_dedicated_logging_pvc_is_mounted_when_configured():
 def test_no_dp_qwen_uses_single_port_and_no_dp_flags():
     spec = load_spec(ROOT / "models" / "qwen" / "aggregated.yaml", CLUSTER)
     spec.role("decode").lws.replicas = 2
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     deployment = _find(objects, "Deployment", "decode")
     container = deployment["spec"]["template"]["spec"]["containers"][0]
     script = container["args"][0]
@@ -897,7 +897,7 @@ def test_single_node_pipeline_parallelism_uses_all_tp_pp_gpus():
     role.parallelism.pp = 2
     role.resources.gpus = 4
 
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     deployment = _find(objects, "Deployment", "decode")
     container = deployment["spec"]["template"]["spec"]["containers"][0]
     script = container["args"][0]
@@ -917,7 +917,7 @@ def test_cross_node_pipeline_parallelism_routes_only_to_group_leader():
     role.parallelism.pp = 2
     role.resources.gpus = 1
 
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     workload = _find(objects, "LeaderWorkerSet", "decode")
     container = workload["spec"]["leaderWorkerTemplate"]["workerTemplate"][
         "spec"
@@ -940,7 +940,7 @@ def test_cross_node_pipeline_parallelism_routes_only_to_group_leader():
 
 def test_llmd_data_parallelism_derives_external_dp_without_pd_proxy():
     spec = load_spec(ROOT / "models" / "qwen" / "h200-aggregated.yaml", EXAMPLE_H200)
-    objects = render(spec, user="tester", cluster=EXAMPLE_H200)
+    objects = render_kubernetes(spec, user="tester", cluster=EXAMPLE_H200)
     deployment = _find(objects, "Deployment", "decode")
     pod_spec = deployment["spec"]["template"]["spec"]
     container = pod_spec["containers"][0]
@@ -961,7 +961,7 @@ def test_null_role_vllm_arg_omits_manifesto_default():
     spec = load_spec(ROOT / "models" / "qwen" / "aggregated.yaml", CLUSTER)
     spec.role("decode").vllm_args["disable_access_log_for_endpoints"] = None
 
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     deployment = _find(objects, "Deployment", "decode")
     script = deployment["spec"]["template"]["spec"]["containers"][0]["args"][0]
 
@@ -972,7 +972,7 @@ def test_model_revision_is_rendered_as_vllm_revision():
     spec = load_spec(ROOT / "models" / "qwen" / "aggregated.yaml", CLUSTER)
     spec.model.revision = "7bc0af58401941643ce20bda71d052dcd2096e80"
 
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     deployment = _find(objects, "Deployment", "decode")
     script = deployment["spec"]["template"]["spec"]["containers"][0]["args"][0]
 
@@ -988,7 +988,7 @@ def test_role_raw_vllm_args_are_appended_without_interpretation():
         "--override-generation-config={\"temperature\":0.5}",
     ]
 
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     deployment = _find(objects, "Deployment", "decode")
     script = deployment["spec"]["template"]["spec"]["containers"][0]["args"][0]
 
@@ -1000,7 +1000,7 @@ def test_role_raw_vllm_args_are_appended_without_interpretation():
 
 def test_single_node_dp_uses_deployment_without_lws_environment():
     spec = load_spec(ROOT / "models" / "qwen" / "h200-aggregated.yaml", EXAMPLE_H200)
-    objects = render(spec, user="tester", cluster=EXAMPLE_H200)
+    objects = render_kubernetes(spec, user="tester", cluster=EXAMPLE_H200)
     deployment = _find(objects, "Deployment", "decode")
     script = deployment["spec"]["template"]["spec"]["containers"][0]["args"][0]
 
@@ -1013,7 +1013,7 @@ def test_single_node_role_can_force_leader_worker_set():
     spec = load_spec(ROOT / "models" / "qwen" / "h200-aggregated.yaml", EXAMPLE_H200)
     spec.role("decode").workload = "leaderworkerset"
 
-    objects = render(spec, user="tester", cluster=EXAMPLE_H200)
+    objects = render_kubernetes(spec, user="tester", cluster=EXAMPLE_H200)
 
     workload = _find(objects, "LeaderWorkerSet", "decode")
     assert workload["spec"]["leaderWorkerTemplate"]["size"] == 1
@@ -1047,7 +1047,7 @@ def test_pd_cross_node_tp_filters_decode_leaders_in_epp_profile():
     decode.parallelism.tp = 8
     decode.parallelism.dp = False
 
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     infpool = _find(objects, "InferencePool")
     selector = infpool["spec"]["selector"]["matchLabels"]
     assert "leaderworkerset.sigs.k8s.io/worker-index" not in selector
@@ -1087,7 +1087,7 @@ def test_pd_cross_node_tp_filters_each_role_profile():
         role.parallelism.tp = 8
         role.parallelism.dp = False
 
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     configmap = _find(objects, "ConfigMap", "epp-config")
     config = yaml.safe_load(configmap["data"]["plugins.yaml"])
     plugins = {plugin.get("name"): plugin for plugin in config["plugins"]}
@@ -1110,7 +1110,7 @@ def test_pd_dp2_tp8_decode_uses_two_routable_two_node_tp_groups():
     decode.parallelism.tp = 8
     decode.parallelism.dp = 2
 
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     workload = _find(objects, "LeaderWorkerSet", "decode")
     assert workload["spec"]["replicas"] == 1
     assert workload["spec"]["leaderWorkerTemplate"]["size"] == 4
@@ -1159,7 +1159,7 @@ def test_routing_disabled_dp2_tp8_uses_internal_vllm_load_balancing():
     decode.parallelism.dp = 2
     decode.resources.gpus = 4
 
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     workload = _find(objects, "LeaderWorkerSet", "decode")
     container = workload["spec"]["leaderWorkerTemplate"]["workerTemplate"][
         "spec"
@@ -1195,7 +1195,7 @@ def test_internal_dp_uses_one_coordinated_api_endpoint(nodes):
     role.parallelism.dp = 2 * nodes
     role.resources.gpus = 4
 
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
     if nodes == 1:
         workload = _find(objects, "Deployment", "decode")
         container = workload["spec"]["template"]["spec"]["containers"][0]
@@ -1266,7 +1266,7 @@ def test_api_placement_agrees_with_launch_probes_and_routing(
     api_nodes = external_api_nodes if routing == "load_aware" else [0]
     port_count = external_ports if routing == "load_aware" else 1
 
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
     if nodes == 1:
         workload = _find(objects, "Deployment", "decode")
         container = workload["spec"]["template"]["spec"]["containers"][0]
@@ -1332,7 +1332,7 @@ def test_api_placement_agrees_with_launch_probes_and_routing(
 
 def test_cross_node_tp_custom_epp_render_is_repeatable_and_non_mutating():
     spec = load_spec(ROOT / "models" / DEEPSEEK, CLUSTER)
-    base_objects = render(spec, user="tester", cluster=CLUSTER)
+    base_objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     base_configmap = _find(base_objects, "ConfigMap", "epp-config")
     selected_config = yaml.safe_load(base_configmap["data"]["plugins.yaml"])
     unselected_config = {"kind": "EndpointPickerConfig", "plugins": []}
@@ -1349,7 +1349,7 @@ def test_cross_node_tp_custom_epp_render_is_repeatable_and_non_mutating():
     decode.lws.size = 2
     decode.parallelism.tp = 8
     decode.parallelism.dp = False
-    first_objects = render(spec, user="tester", cluster=CLUSTER)
+    first_objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     first_configmap = _find(first_objects, "ConfigMap", "epp-config")
     first_selected = yaml.safe_load(first_configmap["data"]["selected.yaml"])
     assert yaml.safe_load(first_configmap["data"]["unselected.yaml"]) == unselected_config
@@ -1363,7 +1363,7 @@ def test_cross_node_tp_custom_epp_render_is_repeatable_and_non_mutating():
 
     decode.lws.size = 4
     decode.parallelism.dp = 2
-    second_objects = render(spec, user="tester", cluster=CLUSTER)
+    second_objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     second_configmap = _find(second_objects, "ConfigMap", "epp-config")
     second_selected = yaml.safe_load(second_configmap["data"]["selected.yaml"])
     second_filter = next(
@@ -1460,7 +1460,7 @@ def test_epp_uses_dedicated_service_account_and_rbac():
 def test_example_h200_cluster_uses_generic_cache_and_rdma_settings():
     spec = load_spec(ROOT / "models" / "qwen" / "h200-aggregated.yaml", EXAMPLE_H200)
     assert spec.model.hf_home == "/var/cache/huggingface"
-    objects = render(spec, user="tester", cluster=EXAMPLE_H200)
+    objects = render_kubernetes(spec, user="tester", cluster=EXAMPLE_H200)
     deployment = _find(objects, "Deployment", "decode")
     pod_spec = deployment["spec"]["template"]["spec"]
     container = pod_spec["containers"][0]
@@ -1508,7 +1508,7 @@ def test_routing_plugin_config_can_be_inline_override():
         "kind": "EndpointPickerConfig",
         "plugins": [{"type": "weighted-random-picker", "name": "custom-picker"}],
     }
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     config = _find(objects, "ConfigMap", "epp-config")
 
     assert "custom-picker" in config["data"]["plugins.yaml"]
@@ -1528,7 +1528,7 @@ def test_routing_epp_can_select_one_of_multiple_plugin_configs():
             },
         },
     )
-    objects = render(spec, user="tester", cluster=CLUSTER)
+    objects = render_kubernetes(spec, user="tester", cluster=CLUSTER)
     config = _find(objects, "ConfigMap", "epp-config")
     deployment = _find(objects, "Deployment", "infpool-epp")
     container = _container(deployment, "epp")

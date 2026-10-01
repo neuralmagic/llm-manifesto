@@ -5,7 +5,7 @@ from pydantic import ValidationError
 
 from manifesto.cluster import Cluster
 from manifesto.instance import Instance
-from manifesto.render import render
+from manifesto.render import render_kubernetes
 from manifesto.resolve import resolve_role
 from manifesto.spec import DeploymentSpec
 
@@ -125,7 +125,7 @@ def test_removed_model_server_resources_section_is_rejected():
 def test_pod_defaults_render_metadata_scheduling_resources_and_security():
     cluster = _custom_cluster()
     spec = _spec(cluster)
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
     lws = next(obj for obj in objects if obj["kind"] == "LeaderWorkerSet")
     template = lws["spec"]["leaderWorkerTemplate"]["workerTemplate"]
     pod_spec = template["spec"]
@@ -152,7 +152,7 @@ def test_pod_defaults_render_metadata_scheduling_resources_and_security():
 def test_openshift_scc_binding_targets_release_service_account():
     cluster = _custom_cluster(scc="custom-driver")
     spec = _spec(cluster)
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
     service_account = next(obj for obj in objects if obj["kind"] == "ServiceAccount")
     binding = next(obj for obj in objects if obj["kind"] == "RoleBinding")
 
@@ -197,7 +197,7 @@ def test_empty_container_security_context_is_preserved():
     cluster = _custom_cluster()
     cluster.pod_defaults.container_security_context = {}
     spec = _spec(cluster)
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
     lws = next(obj for obj in objects if obj["kind"] == "LeaderWorkerSet")
     container = lws["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"]["containers"][0]
 
@@ -211,7 +211,7 @@ def test_optional_pod_defaults_are_emitted_only_when_configured():
     cluster.pod_defaults.working_dir = "/workspace"
     spec = _spec(cluster)
 
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
     lws = next(obj for obj in objects if obj["kind"] == "LeaderWorkerSet")
     pod_spec = lws["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"]
     container = pod_spec["containers"][0]

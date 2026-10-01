@@ -68,6 +68,8 @@ def validate_slurm(spec: DeploymentSpec, cluster: Cluster) -> None:
         raise ValueError("Slurm rendering requires a platform: slurm cluster profile")
     if spec.topology != TopologyKind.AGGREGATED or spec.routing.kind != RoutingKind.DISABLED:
         raise ValueError("Slurm currently supports aggregated serving with routing.kind: disabled")
+    if spec.routing.epp is not None:
+        raise ValueError("Slurm does not support routing profiles")
     if len(spec.roles) != 1:
         raise ValueError("Slurm requires exactly one serving role; use lws.replicas for replicas")
     runtime = spec.runtime

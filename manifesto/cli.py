@@ -428,14 +428,11 @@ def _config_validate(args: argparse.Namespace) -> int:
 
     model_path = resolve_model(args.spec)
     spec = load_spec(model_path, cluster, accelerator=args.accelerator)
+    artifact = render(spec, user=resolve_user(args.user), cluster=cluster)
     if cluster.platform == "slurm":
-        from .slurm import render_slurm
-
-        render_slurm(spec, user=resolve_user(args.user), cluster=cluster)
         summary = "1 Slurm batch script"
     else:
-        objects = render(spec, user=resolve_user(args.user), cluster=cluster)
-        summary = f"{len(objects)} Kubernetes objects"
+        summary = f"{len(list(yaml.safe_load_all(artifact)))} Kubernetes objects"
     print(f"Valid cluster: {Path(cluster_path).resolve()}")
     print(f"Valid model:   {Path(model_path).resolve()}")
     print(f"Renders:       {summary}")

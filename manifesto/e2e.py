@@ -14,7 +14,7 @@ from . import workflow
 from .cluster import Cluster
 from .images import DEFAULT_IMAGES
 from .instance import Instance
-from .render import render, render_to_yaml
+from .render import render_kubernetes, render_to_yaml
 from .render.routing import gateway_name, standalone_service_name
 from .resolve import resolve_role
 from .spec import DeploymentSpec, RoutingFrontend, RoutingKind, load_spec
@@ -110,7 +110,7 @@ def _preflight(
         accelerator=getattr(args, "accelerator", None),
     )
     workflow.apply_runtime_overrides(spec, args, config)
-    objects = render(spec, user=config.user, cluster=cluster)
+    objects = render_kubernetes(spec, user=config.user, cluster=cluster)
     if not spec.runtime.vllm_env and (
         any(obj.get("kind") == "PersistentVolumeClaim" for obj in objects)
         or _contains_key(objects, "persistentVolumeClaim")

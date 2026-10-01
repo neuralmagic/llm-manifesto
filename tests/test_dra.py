@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from manifesto.cluster import AcceleratorConfig, Cluster
 from manifesto.dra import DRA_CLAIM_NAME
 from manifesto.instance import Instance
-from manifesto.render import render
+from manifesto.render import render_kubernetes
 from manifesto.render.lws import render_workload
 from manifesto.spec import load_spec
 from manifesto.workload import (
@@ -103,7 +103,7 @@ def test_serving_workloads_swap_extended_resources_for_dra_claims(
     cluster = _dra_cluster()
     spec = load_spec(ROOT / model, cluster)
     _assert_dra_pair(
-        render(spec, user="tester", cluster=cluster), workload_kind, count
+        render_kubernetes(spec, user="tester", cluster=cluster), workload_kind, count
     )
 
 
@@ -111,7 +111,7 @@ def test_zero_gpu_dra_role_emits_no_template_or_claim():
     cluster = _dra_cluster()
     spec = load_spec(ROOT / "models/qwen/aggregated.yaml", cluster)
     spec.role("decode").resources.gpus = 0
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
     workload = next(
         obj
         for obj in objects

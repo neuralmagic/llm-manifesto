@@ -1,4 +1,4 @@
-"""Top-level render pipeline that emits one YAML-ready object list per deployment."""
+"""Kubernetes object rendering and YAML serialization."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def _literal_multiline_strings(value):
     return value
 
 
-def render(
+def render_kubernetes(
     spec: DeploymentSpec,
     *,
     user: str,
@@ -45,7 +45,7 @@ def render(
     routing_only: bool = False,
 ) -> list[dict]:
     if cluster.platform == "slurm":
-        raise ValueError("use render_slurm for Slurm batch scripts")
+        raise ValueError("render_kubernetes requires a Kubernetes or OpenShift cluster profile")
     instance = Instance(
         user=user,
         release=spec.release,

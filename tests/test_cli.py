@@ -11,7 +11,7 @@ import yaml
 from manifesto.cli import _build_parser, main
 from manifesto.cluster import Cluster, load_cluster
 from manifesto.overrides import load_routing_profile
-from manifesto.render import render
+from manifesto.render import render_kubernetes
 from manifesto.spec import RoutingFrontend, load_spec
 import manifesto.workflow as workflow
 from manifesto.workflow import (
@@ -936,7 +936,7 @@ def test_deploy_routing_applies_without_syncing_hf_secret(monkeypatch):
 
 def test_standalone_deploy_prunes_obsolete_gateway_resources(monkeypatch):
     spec = load_spec(MODEL, load_cluster(CLUSTER))
-    objects = render(spec, user="tester", cluster=load_cluster(CLUSTER), routing_only=True)
+    objects = render_kubernetes(spec, user="tester", cluster=load_cluster(CLUSTER), routing_only=True)
     live = [
         workflow.LiveResource.from_object(
             _live_object(
@@ -977,7 +977,7 @@ def test_gateway_deploy_prunes_obsolete_envoy_config(monkeypatch):
     cluster = load_cluster(CLUSTER)
     spec = load_spec(MODEL, cluster)
     spec.routing.frontend = RoutingFrontend.GATEWAY
-    objects = render(spec, user="tester", cluster=cluster, routing_only=True)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster, routing_only=True)
     live = [
         workflow.LiveResource.from_object(
             _live_object(
@@ -1012,7 +1012,7 @@ def test_deploy_cleanup_prunes_only_superseded_dra_templates(monkeypatch):
     }
     cluster = Cluster.model_validate(cluster_data)
     spec = load_spec(MODEL, cluster)
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
     desired = next(
         obj for obj in objects if obj["kind"] == "ResourceClaimTemplate"
     )
@@ -1063,7 +1063,7 @@ def test_dra_preflight_checks_api_and_device_class(monkeypatch):
     }
     cluster = Cluster.model_validate(cluster_data)
     spec = load_spec(STANDALONE_MODEL, cluster)
-    objects = render(spec, user="tester", cluster=cluster)
+    objects = render_kubernetes(spec, user="tester", cluster=cluster)
     calls = []
 
     def fake_capture(cmd, **_kwargs):
@@ -1874,6 +1874,6 @@ def test_kubectl_read_budget_is_configurable(monkeypatch):
 
 def test_teardown_allowlist_covers_every_rendered_kind():
     cluster = load_cluster(CLUSTER)
-    objects = render(load_spec(MODEL, cluster), user="tester", cluster=cluster)
+    objects = render_kubernetes(load_spec(MODEL, cluster), user="tester", cluster=cluster)
 
     assert {(obj["apiVersion"], obj["kind"]) for obj in objects} <= set(MANAGED_RESOURCE_TYPES)
